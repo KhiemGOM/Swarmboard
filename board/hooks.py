@@ -157,6 +157,10 @@ class Adapter:
                 except ValueError:
                     return blocked('Edit target is outside the Swarmboard workspace.')
                 target = os.path.normcase(relative.as_posix()).replace('\\', '/') or '.'
+                with closing(sqlite3.connect(f'{self.database.as_uri()}?mode=ro', uri=True)) as db:
+                    queues = db.execute("SELECT id,path FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')").fetchall()
+                if any(target == row[1] or target.startswith(row[1] + '/') or row[1].startswith(target + '/') for row in queues):
+                    return blocked('Swarmboard: this file has a patch queue lock. Submit a patch through patch_queue; direct edits are forbidden until finalization.')
                 if not any(row['kind'] == 'file' and (row['path'] == '.' or target == row['path'] or target.startswith(row['path'] + '/')) for row in claims):
                     return blocked(f'Swarmboard: acquire an accepted file claim for {path} before editing.')
         if event == 'PreToolUse' and name in ('Bash', 'exec_command'):
@@ -165,7 +169,7 @@ class Adapter:
                 if not any(row['kind'] == 'resource' and row['path'] == 'git:index' for row in claims):
                     return blocked('Swarmboard: acquire git:index before this Git operation and hold it through staging, commit and index sync.')
         reminders = [inbox] if inbox else []
-        reminders.extend(status[k] for k in ('custody_reminder', 'job_reminder') if k in status)
+        reminders.extend(status[k] for k in ('custody_reminder', 'job_reminder', 'patch_custody_reminder') if k in status)
         if event == 'Stop' and claims:
             shortcut = '$board mutex' if self.harness == 'codex' else '/board mutex'
             reminders.append(f'You still hold {len(claims)} file/resource mutex(es). Review them with {shortcut}; release idle resource locks with a reason and idle file locks with commit evidence or HELD. Keep only locks required by current work or an active process; do not automatically renew all claims.')

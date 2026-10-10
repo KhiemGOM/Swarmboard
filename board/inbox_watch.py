@@ -53,6 +53,8 @@ def watch_inbox(workspace, database, payload, seconds=3600, poll_seconds=2):
             # Replaced/retired identities must not keep waking this session.
             if json.loads(binding.read_text()).get('agent_id') != agent:
                 return None
+            from .waits import poll
+            poll(str(database), workspace)
             with closing(sqlite3.connect(f'{database.as_uri()}?mode=ro', uri=True, timeout=2)) as db:
                 configured = db.execute("SELECT value FROM settings WHERE key='workspace'").fetchone()
                 active = db.execute('SELECT state,disconnected FROM agents WHERE id=?', (agent,)).fetchone()

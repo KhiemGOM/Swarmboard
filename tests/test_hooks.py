@@ -48,6 +48,15 @@ class HookTests(unittest.TestCase):
     def bind(self):
         return self.event('PostToolUse', tool_name='mcp__board__board_status', tool_response={'content': [{'type': 'text', 'text': json.dumps({'your_agent_id': self.agent['agent_id']})}]})
 
+    def test_queue_member_cannot_directly_edit_queued_file(self):
+        path = self.root / 'common.py'
+        path.write_text('original\n')
+        self.call('patch_queue', action='join', path=str(path), reason='shared file')
+        self.bind()
+        response = self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(path)})
+        self.assertEqual(response['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('patch queue lock', response['hookSpecificOutput']['permissionDecisionReason'])
+
     def test_link_uses_existing_mcp_identity_and_denies_unclaimed_edits(self):
         self.assertEqual(self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(self.root / 'a.py')})['hookSpecificOutput']['permissionDecision'], 'deny')
         self.bind()

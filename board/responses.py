@@ -19,6 +19,8 @@ def check(method, value):
         'noticeboard_read': 'Use limit=1 (or a smaller limit) and after_id; advance after_id to the last returned post ID.',
         'inbox_read': 'Use limit=1 (or a smaller limit) and after_id; advance after_id to the last returned message ID. Reading never acknowledges messages.',
         'job_list': 'Use state, limit=1 (or a smaller limit) and after_id; advance after_id to the last returned job ID.',
+        'patch_queue': 'Use action=read with content=base, candidate or patch and a smaller limit plus offset. Submit smaller patches.',
+        'board_wait': 'Use action=list with after_id to page through waits.',
     }
     hint = hints.get(method, 'Use a smaller batch or shorter text fields. Narrow board_status by agent/path/resource to inspect existing state.')
     raise BoardError(f'RESPONSE_TOO_LARGE: {method} produced {size} characters; cap is {MAX_RESPONSE_CHARS}. No result was truncated. This call was rolled back. Be more precise: {hint}')

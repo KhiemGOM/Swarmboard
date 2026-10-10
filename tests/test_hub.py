@@ -100,7 +100,7 @@ class HubTests(unittest.TestCase):
         url = f"http://127.0.0.1:{server.server_port}"
         entry = Path(__file__).resolve().parents[1] / "run_board.py"
         processes = [subprocess.Popen([sys.executable, str(entry), "mcp", "--url", url, "--name", name],
-                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=self.root)
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', cwd=self.root)
                      for name in ["codex-probe", "claude-probe"]]
         def rpc(process, method, params=None):
             process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}) + "\n")
@@ -116,11 +116,14 @@ class HubTests(unittest.TestCase):
             for process in processes:
                 initialized = rpc(process, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}})
                 self.assertEqual(initialized["serverInfo"]["name"], "swarmboard")
-                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 21)
+                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 23)
             first, second = processes
             a = tool(first, "board_status")["your_agent_id"]
             b = tool(second, "board_status")["your_agent_id"]
             self.assertNotEqual(a, b)
+            unicode_message = tool(first, 'inbox_send', {'recipient_agent_id': b, 'body': 'Unicode patch context: 日本語 🐝'})
+            self.assertIn('日本語 🐝', tool(second, 'inbox_read')['messages'][0]['body'])
+            tool(second, 'inbox_ack', {'message_ids': [unicode_message['id']]})
             self.assertTrue(tool(first, "claim", {"paths": ["src"], "reason": "probe"})["accepted"])
             self.assertFalse(tool(second, "claim", {"paths": ["src/a.py"], "reason": "probe"})["accepted"])
             files = tool(first, "board_status")["claims"]

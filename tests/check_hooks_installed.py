@@ -46,7 +46,7 @@ def main():
         sender = None
         try:
             rpc('initialize', {'protocolVersion': '2025-11-25'})
-            status = rpc('tools/call', {'name': 'board_status', 'arguments': {}})
+            status = rpc('tools/call', {'name': 'board_status', 'arguments': {'target_agent_id': 'self', 'include_rules': False}})
             assert not status['isError'], status
             event('SessionStart')
             bound = event('PostToolUse', tool_name='mcp__board__board_status', tool_response=status)
@@ -74,13 +74,25 @@ def main():
                 assert repeated.returncode == 0 and not repeated.stderr, repeated.stderr
             rpc('tools/call', {'name': 'inbox_ack', 'arguments': {'message_ids': [message_id]}})
             assert event('PostToolUse', tool_name='Read', tool_response='probe') == {}
+            # Exercise opt-in events through saved MCP and hook commands too.
+            subscription = rpc('tools/call', {'name': 'board_wait', 'arguments': {
+                'action': 'subscribe', 'kind': 'mutex_free', 'resource': 'misc:isolated-wait-probe'}})
+            assert not subscription['isError'], subscription
+            delivery = event('PostToolUse', tool_name='Read', tool_response='probe')
+            assert 'mutex_free' in delivery['hookSpecificOutput']['additionalContext'], delivery
+            if harness == 'claude':
+                wake = event('Stop', watch=True)
+                assert wake.returncode == 2 and 'mutex_free' in wake.stderr, wake.stderr
+                assert event('Stop', watch=True).returncode == 0
+            messages = json.loads(rpc('tools/call', {'name': 'inbox_read', 'arguments': {}})['content'][0]['text'])['messages']
+            rpc('tools/call', {'name': 'inbox_ack', 'arguments': {'message_ids': [row['id'] for row in messages]}})
             guarded = event('PreToolUse', tool_name='Bash', tool_input={'command': 'git commit -m hook-probe'})
             assert guarded['hookSpecificOutput']['permissionDecision'] == 'deny', guarded
             event('Stop')
             event('SessionEnd')
             print(json.dumps({'harness': harness, 'saved_hook_payloads': 'passed', 'unclaimed_edit': 'denied', 'unclaimed_git_index': 'denied', 'files_edited': False,
                               'hook_launcher': 'direct argv' if harness == 'claude' else 'CMD on Windows / shell on Unix', 'inbox_tool_and_prompt_delivery': 'passed', 'delivery_does_not_ack': 'passed',
-                              'claude_wake_signal': 'passed' if harness == 'claude' else 'not installed',
+                              'claude_wake_signal': 'passed' if harness == 'claude' else 'not installed', 'opt_in_wait_delivery': 'passed',
                               'native_harness_dispatch': 'not exercised; reload/review changed hook definitions'}))
         finally:
             for connection in (sender, process):

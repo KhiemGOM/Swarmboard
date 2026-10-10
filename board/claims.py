@@ -35,6 +35,10 @@ def dispatch(hub, db, method, p, agent, now):
                             for kind, path in entities)]
         if conflicts:
             return {"accepted": False, "conflicts": conflicts}
+        queues = [dict(row) for row in db.execute("SELECT id,path,state FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')")
+                  if any(kind == 'file' and hub.overlaps(path, row['path']) for kind, path in entities)]
+        if queues:
+            return {'accepted': False, 'patch_queue_conflicts': queues, 'reason': 'Patch queue lock forbids direct edits; join the queue or wait for finalization.'}
         ids = []
         for kind, path in entities:
             own = db.execute("SELECT id FROM claims WHERE active=1 AND agent=? AND kind=? AND path=?", (agent, kind, path)).fetchone()
@@ -46,6 +50,11 @@ def dispatch(hub, db, method, p, agent, now):
                                       (agent, path, kind, reason, now, now + ttl)).lastrowid
             ids.append(claim_id)
             if kind == "file":
+                prior = db.execute('SELECT state FROM custody WHERE path=?', (path,)).fetchone()
+                if prior is None or prior['state'] == 'COMMITTED':
+                    db.execute('INSERT OR REPLACE INTO custody_age VALUES (?,?)', (path, now))
+                else:
+                    db.execute('INSERT OR IGNORE INTO custody_age VALUES (?,?)', (path, now))
                 # Continuing overlapping unfinished work also accepts its custody.
                 for old in db.execute("SELECT path,owner FROM custody WHERE state!='COMMITTED'").fetchall():
                     if hub.overlaps(path, old["path"]) and old["owner"] != agent:

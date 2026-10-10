@@ -11,6 +11,8 @@ COORDINATION_RULES = (
     "Use mutex_claim for shared resources with agreed IDs: db:NAME, port:NUMBER, build:OUTPUT, git:index or misc:NAME. "
     "Hold git:index throughout staging, commit and index sync; release resource locks with a completion reason. "
     "Review your mutexes at scope changes and before stopping; keep only locks needed by current work or an active process. Release idle resource locks with a reason. "
+    "For common files use patch_queue: join, read immutable base, submit a unified diff with base_hash, then release. Never directly edit a queued file. Compatible patches are accepted atomically; the last release publishes the candidate if the file is unchanged and sends one final system inbox event per participant. Inspect your contribution and run targeted tests afterward; no automatic test or commit is implied. Record applied patch custody with patch_queue action=record_commit. "
+    "Inbox delivery is automatic. board_wait is opt-in for sent-message acknowledgment, mutex availability or patch completion; no separate reply wait. Claude's linked watcher wakes on events, while Codex waits for your next interaction. "
     "File release requires commit_hash or held_reason; HELD frees locks but retains custody. "
     "Resolve HELD records with custody_resolve after committing. Overlapping work accepts unfinished custody; expiry does not clear it. "
     "Commit evidence is recorded, not proof of validation or push. "

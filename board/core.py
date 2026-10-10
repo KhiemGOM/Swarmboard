@@ -51,6 +51,9 @@ class Hub:
                     lease_token TEXT, expires REAL, progress TEXT, recovery_reason TEXT,
                     summary TEXT, commit_hash TEXT, checks TEXT, created REAL, updated REAL);
             """)
+            from . import patch_queue, waits
+            patch_queue.initialize(db)
+            waits.initialize(db)
             if "disconnected" not in {row[1] for row in db.execute("PRAGMA table_info(agents)")}:
                 db.execute("ALTER TABLE agents ADD COLUMN disconnected REAL")
             columns = {row[1] for row in db.execute('PRAGMA table_info(agents)')}
@@ -94,6 +97,28 @@ class Hub:
                    (kind, agent, json.dumps(payload), time.time()))
 
     def call(self, method, params):
+        from . import patch_queue, waits
+        # Finish any previously committed intent, including recovery after crash.
+        patch_queue.finalize_pending(self)
+        result = self._call(method, params)
+        patch_queue.finalize_pending(self)
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            waits.process(db, time.time())
+            batch_id = result.get('batch_id')
+            if batch_id and method == 'patch_queue':
+                batch = db.execute('SELECT * FROM patch_batches WHERE id=?', (batch_id,)).fetchone()
+                result['batch'] = patch_queue.summary(db, batch)
+            if method in ('patch_queue', 'retire', 'takeover') and params.get('agent_id'):
+                agent = params['agent_id']
+                count = db.execute('SELECT COUNT(*) FROM messages WHERE recipient=? AND acknowledged IS NULL', (agent,)).fetchone()[0]
+                # Release may have generated the final event after _call committed.
+                if count != result.get('unread_inbox'):
+                    result['unread_inbox'] = count
+                    result['inbox_reminder'] = f'You have {count} unread message(s). Call inbox_read, then inbox_ack after processing.'
+        return result
+
+    def _call(self, method, params):
         with self.connect() as db:
             # Serializes claim-check + insertion and takeover + transfer.
             db.execute("BEGIN IMMEDIATE")
@@ -143,6 +168,15 @@ class Hub:
             held = db.execute("SELECT COUNT(*) FROM custody WHERE owner=? AND state='HELD'", (agent,)).fetchone()[0]
             if held and not result.get('stop_session'):
                 result["custody_reminder"] = f"You retain custody of {held} HELD path(s). Complete and record commit evidence with custody_resolve, or arrange an explicit takeover."
+                oldest = db.execute("SELECT MIN(a.since) FROM custody_age a JOIN custody c ON c.path=a.path WHERE c.owner=? AND c.state='HELD'", (agent,)).fetchone()[0]
+                if oldest is not None and now - oldest >= 7200:
+                    result['custody_reminder'] += f' Oldest unresolved work is {int((now-oldest)/3600)}h old (over 2h). Commit small coherent pieces; reclaim/release does not reset this age.'
+            patch_count = db.execute("SELECT COUNT(*) FROM patches WHERE agent=? AND state='APPLIED'", (agent,)).fetchone()[0]
+            if patch_count:
+                result['patch_custody_reminder'] = f'{patch_count} applied patch(es) await commit evidence. Inspect/test, commit, then patch_queue action=record_commit with your patch_ids and commit_hash.'
+                oldest_patch = db.execute("SELECT MIN(created) FROM patches WHERE agent=? AND state='APPLIED'", (agent,)).fetchone()[0]
+                if now - oldest_patch >= 7200:
+                    result['patch_custody_reminder'] += ' Some patch work is over 2h old; commit small coherent pieces.'
             owned = db.execute("SELECT id,expires FROM jobs WHERE state='CLAIMED' AND owner=?", (agent,)).fetchall()
             if owned:
                 result['job_reminder'] = 'You own unfinished jobs. Use job_update to save progress and renew leases; job_finish with evidence or job_yield with a handoff. Job ownership does not grant file/resource locks.'
@@ -154,6 +188,12 @@ class Hub:
             return result
 
     def dispatch(self, db, method, p, agent, now):
+        if method == 'patch_queue':
+            from .patch_queue import dispatch
+            return dispatch(self, db, p, agent, now)
+        if method == 'board_wait':
+            from .waits import dispatch
+            return dispatch(self, db, p, agent, now)
         if method == 'board_info':
             identity = db.execute('SELECT inherited_from,successor_id,inherited_at FROM agents WHERE id=?', (agent,)).fetchone()
             return {'service': 'swarmboard', 'version': VERSION, 'schema_version': SCHEMA_VERSION,
@@ -207,13 +247,29 @@ class Hub:
                           row['kind'] == 'resource' and row['path'] in queries.get('resources', [])]
                 custody = [row for row in custody if any(self.overlaps(row['path'], path) for path in queries.get('paths', []))]
                 holders = {row['agent'] for row in claims} | {row['owner'] for row in custody}
+                for queued in db.execute("SELECT id,path FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')"):
+                    if any(self.overlaps(queued['path'], path) for path in queries.get('paths', [])):
+                        holders.update(row[0] for row in db.execute('SELECT agent FROM patch_members WHERE batch_id=?', (queued['id'],)))
                 agents = [row for row in agents if row['id'] in holders]
+            for row in custody:
+                age = db.execute('SELECT since FROM custody_age WHERE path=?', (row['path'],)).fetchone()
+                row['unresolved_since'] = age[0] if age else None
+                row['age_warning'] = row['state'] == 'HELD' and bool(age and now - age[0] >= 7200)
             result = {"workspace": str(self.workspace), "agents": agents, "claims": claims,
                       "custody": custody, "status_scope": target or 'workspace',
                       "filters": {**queries, **({'target_agent_id': target} if target is not None else {})},
                       "job_counts_scope": target or 'workspace',
                       "job_counts": {r['state']: r['n'] for r in db.execute('SELECT state,COUNT(*) AS n FROM jobs' +
                                    (' WHERE owner=?' if target is not None else '') + ' GROUP BY state', values)}}
+            queue_rows = list(db.execute("SELECT id,path,state,base_hash FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING') ORDER BY id"))
+            result['patch_queues'] = [dict(row) for row in queue_rows if
+                (target is None or db.execute('SELECT 1 FROM patch_members WHERE batch_id=? AND agent=?', (row['id'], target)).fetchone()) and
+                (not queries or any(self.overlaps(row['path'], path) for path in queries.get('paths', [])))]
+            patch_rows = list(db.execute("SELECT p.id,p.batch_id,p.agent,p.state,p.created,b.path FROM patches p JOIN patch_batches b ON b.id=p.batch_id WHERE p.state!='COMMITTED' ORDER BY p.id"))
+            result['patch_custody'] = [dict(row) for row in patch_rows if (target is None or row['agent'] == target) and
+                (not queries or any(self.overlaps(row['path'], path) for path in queries.get('paths', [])))]
+            for row in result['patch_custody']:
+                row['age_warning'] = row['state'] == 'APPLIED' and now - row['created'] >= 7200
             if include_rules:
                 result['coordination_rules'] = COORDINATION_RULES
             if queries:
@@ -221,7 +277,8 @@ class Hub:
                     {'kind': kind, 'query': value,
                      'claim_ids': [row['id'] for row in claims if row['kind'] == kind and
                                    (self.overlaps(row['path'], value) if kind == 'file' else row['path'] == value)],
-                     'custody_paths': [row['path'] for row in custody if kind == 'file' and self.overlaps(row['path'], value)]}
+                     'custody_paths': [row['path'] for row in custody if kind == 'file' and self.overlaps(row['path'], value)],
+                     'patch_queue_ids': [row['id'] for row in result['patch_queues'] if kind == 'file' and self.overlaps(row['path'], value)]}
                     for key, kind in (('paths', 'file'), ('resources', 'resource')) for value in queries.get(key, [])]
             return result
         if method.startswith('job_'):
@@ -247,6 +304,9 @@ class Hub:
             # Transfer all live claims atomically; the original session loses access immediately.
             db.execute("UPDATE claims SET agent=?,expires=? WHERE agent=? AND active=1", (agent, now + 7200, target))
             db.execute("UPDATE custody SET owner=?,updated=? WHERE owner=? AND state!='COMMITTED'", (agent, now, target))
+            from .patch_queue import transfer as transfer_patches
+            transfer_patches(db, target, agent)
+            db.execute('UPDATE board_waits SET agent=? WHERE agent=?', (agent, target))
             from .jobs import transfer, view
             transfer(self, db, target, agent, now)
             self.event(db, "takeover", agent, {"target": target, "reason": reason})
@@ -296,4 +356,7 @@ class Hub:
         from .retirement import retire
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            return retire(self, db, target, reason, 'local-operator', time.time())
+            result = retire(self, db, target, reason, 'local-operator', time.time())
+        from .patch_queue import finalize_pending
+        finalize_pending(self)
+        return result

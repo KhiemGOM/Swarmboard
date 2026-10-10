@@ -18,6 +18,9 @@ def retire(hub, db, target, reason, actor, now):
                ('Agent retired: ' + reason, now, target))
     recover_untracked(hub, db, target, now, reason)
     db.execute('UPDATE claims SET active=0 WHERE agent=? AND active=1', (target,))
+    from .patch_queue import retire_member
+    retire_member(db, target, now)
+    db.execute("UPDATE board_waits SET state='CANCELLED' WHERE agent=? AND state='WAITING'", (target,))
     db.execute("UPDATE agents SET state='retired',reason=?,disconnected=? WHERE id=?", (reason, now, target))
     hub.event(db, 'agent_retired', actor, {'target': target, 'reason': reason, 'released_claim_ids': claims,
                                          'reopened_job_ids': [r['id'] for r in jobs]})

@@ -39,6 +39,9 @@ def inherit(hub, db, p, agent, now):
     db.execute('UPDATE claims SET agent=? WHERE agent=? AND active=1', (agent, target))
     custody = [row['path'] for row in db.execute("SELECT path FROM custody WHERE owner=? AND state!='COMMITTED'", (target,))]
     db.execute("UPDATE custody SET owner=?,updated=? WHERE owner=? AND state!='COMMITTED'", (agent, now, target))
+    from .patch_queue import transfer as transfer_patches
+    transfer_patches(db, target, agent)
+    db.execute('UPDATE board_waits SET agent=? WHERE agent=?', (agent, target))
     transfer(hub, db, target, agent, now)
     for row in db.execute("SELECT id FROM jobs WHERE state='OPEN' AND previous_owner=?", (target,)).fetchall():
         db.execute("UPDATE jobs SET state='CLAIMED',owner=?,lease_token=?,expires=?,updated=? WHERE id=?",

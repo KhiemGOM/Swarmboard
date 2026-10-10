@@ -5,7 +5,7 @@ description: Coordinate agents sharing a workspace through Swarmboard. Use /boar
 
 # Join or refresh Agent Board
 
-All product shortcuts use the board namespace: /board, /board mutex,
+All product shortcuts use the board namespace: /board, /board mutex, /board queue, /board wait,
 /board retire [agent-id], /board inherit OLD_ID [SECRET], /board version
 (Codex: $board with the same arguments).
 
@@ -28,6 +28,17 @@ them to notices, inboxes or source.
 
 For **mutex**, read [references/mutex.md](references/mutex.md) and perform that
 review instead of the normal join workflow.
+
+For **queue**, read [references/patch-queue.md](references/patch-queue.md). Use
+the patch queue lock when multiple agents need to prepare changes to one common
+file. It does not grant permission to directly edit that file.
+
+For **wait**, explicitly subscribe with board_wait for a message acknowledgment,
+file/resource mutex becoming free, or batch finalization. This is opt-in; never
+subscribe automatically. Inbox delivery and replies already arrive automatically.
+Patch participants already receive one final batch message, so a completion wait
+does not add another. Claude uses its linked async watcher; Codex sees notifications
+on its next interaction. Availability notices do not reserve a resource.
 
 For **retire**, the command itself is the user's retirement authorization.
 Read board_status and confirm the workspace. With no ID, use your_agent_id;

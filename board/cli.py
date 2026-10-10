@@ -12,7 +12,7 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:4317")
     parser.add_argument("--session", default=".board/session.json")
     parser.add_argument("operation", choices=["register"] + [
-        "board_info", "inheritance_key", "inherit", "board_status", "heartbeat", "disconnect", "retire", "claim", "mutex_claim", "release", "custody_resolve", "takeover", "noticeboard_read", "noticeboard_post", "inbox_send", "inbox_read", "inbox_ack",
+        "board_info", "patch_queue", "board_wait", "inheritance_key", "inherit", "board_status", "heartbeat", "disconnect", "retire", "claim", "mutex_claim", "release", "custody_resolve", "takeover", "noticeboard_read", "noticeboard_post", "inbox_send", "inbox_read", "inbox_ack",
         "job_post", "job_list", "job_claim", "job_update", "job_yield", "job_finish"])
     parser.add_argument("--params", default="{}", help="JSON arguments")
     parser.add_argument("--title", help="Quick job_post title")

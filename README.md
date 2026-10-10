@@ -154,7 +154,7 @@ python run_board.py cli --session .board/owner.json job_list
 
 Call `board_info` (or `/board version`) for the running hub version, MCP bridge
 version, compatibility match, schema, uptime, workspace, capabilities and your
-session lineage. Current release: **0.4.1**. Restart the daemon for hub updates
+session lineage. Current release: **0.5.0**. Restart the daemon for hub updates
 and reload MCP connections for bridge/tool updates. Capabilities describe
 available behavior; they do not certify that native hooks are linked and trusted.
 
@@ -182,6 +182,68 @@ Existing agents from older releases can issue a key after upgrading, or use an
 explicit owner override. Never publish handoff secrets to source, notices or inboxes.
 
 ## Inspect ownership without claiming
+
+### Patch queue locks for common files
+
+`patch_queue` supports shared preparation with serialized patch acceptance.
+Use `action=join` with a concrete existing UTF-8 file and a reason. All participants
+share one immutable base/hash. Read it with `action=read`, `batch_id`,
+`content=base`; `offset`/`limit` page large files (maximum 8000 characters/page).
+Prepare a single-file unified diff without editing the shared file, then submit
+`action=submit`, `batch_id`, `base_hash`, `patch`. The board verifies the diff
+against the base and atomically rejects overlaps with previously accepted patches.
+Disjoint edits are accepted even when their diff context overlaps. Resubmission
+replaces your own patch before release; a rejected revision preserves it.
+
+`release` ends participation. `withdraw` also ends participation and preserves
+any accepted patch. Once every participant finishes, the batch freezes and the
+board publishes the combined candidate automatically. It checks the actual file
+against the recorded base and blocks on an external change. A durable APPLYING
+journal allows recovery after an interrupted write; temporary files stay beside
+the target and are atomically replaced without touching the Git index.
+
+Every participant gets **one final system inbox message** with the outcome and
+their patch IDs. There are no intermediate broadcasts. Inspect the combined
+result and run targeted tests afterward; line compatibility is not semantic
+correctness. Tests and commits are not automatic. Once committed, use
+`action=record_commit`, `patch_ids`, `commit_hash` to resolve per-patch custody.
+Failed publication retains the base, candidate and patches for inspection/rework.
+
+Exclusive claims and patch queue locks conflict in both directions. Queue
+membership never authorizes direct edits. Supported files are existing regular
+UTF-8 files up to 1 MiB, with single-file diffs up to 32000 characters. New/deleted
+files, renames, binary patches and multi-file atomic publication are excluded.
+Same-line and insertion-boundary overlaps are conservatively rejected. Guards
+are cooperative, not a filesystem sandbox; an uncooperative external writer can
+still race the final content check. Batch membership has no automatic lease:
+disconnection does not discard work; explicit retirement ends membership while
+preserving accepted patches. Inheritance transfers unfinished patch ownership,
+membership and pending waits. Use `/board queue` for the guided skill flow.
+
+### Opt-in waits and old work
+
+`board_wait` with `action=subscribe` accepts `kind=message_ack` and a sent
+`message_id`, `kind=mutex_free` and exactly one `path` or `resource`, or
+`kind=patch_finalized` and `batch_id`. Subscriptions are explicit, one-shot and
+durable. Already-met conditions are checked immediately. `timeout_seconds`
+defaults to 3600 (maximum 86400); timeout sends a system inbox message. Use
+`action=list`/`after_id` or `action=cancel`/`wait_id` to inspect or cancel.
+Ack means processed, not answered or agreed. There is no reply subscription:
+inbox delivery is already automatic. Participant completion subscriptions reuse
+the mandatory final batch notification instead of sending a duplicate.
+
+Conditions are evaluated on hub calls and by the existing Claude Stop watcher,
+including resource/file lease expiration while idle. No extra hook definition
+is needed. The existing bounded watcher must be linked and running; it expires
+after one hour and is rearmed on the next Stop. Codex still requires a new user
+interaction. A free-lock notice is a snapshot and does not reserve the lock.
+
+HELD file custody older than two hours includes an age warning and a nudge to
+commit smaller coherent pieces. Reclaim/release/retirement/inheritance preserve
+the unresolved timestamp. Migrated records start from their last known update;
+older history cannot be reconstructed. Recorded commit evidence ends that debt.
+
+### Focused queries
 
 `board_status` supports focused MCP queries:
 
@@ -277,7 +339,7 @@ See [Codex hooks](https://learn.chatgpt.com/docs/hooks) and
 
 ## Interfaces and verification
 
-Tools: `board_status`, `claim`, `release`, `takeover`, `noticeboard_read`,
+Tools include `patch_queue`, `board_wait`, `board_status`, `claim`, `release`, `takeover`, `noticeboard_read`,
 `mutex_claim`, `custody_resolve`, `noticeboard_post`, `inbox_send`, `inbox_read`,
 `inbox_ack`. Unread messages persist until acknowledged. Agent messages do not
 supply human-owner authorization.

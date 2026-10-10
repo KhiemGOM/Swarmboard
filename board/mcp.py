@@ -17,6 +17,20 @@ def schema(properties=None, required=None):
 STRING = {"type": "string"}
 IDS = {"type": "array", "items": {"type": "integer"}, "minItems": 1}
 TOOLS = [
+    {'name': 'patch_queue', 'description': 'Shared patch queue lock for common files. join reserves participation without direct edit permission; read pages the immutable base/candidate or a submitted diff. submit atomically accepts a single-file unified diff against base_hash, rejecting overlapping edits; resubmitting replaces your own prior patch while ACTIVE. release/withdraw closes participation and preserves accepted patches. Last release automatically applies the combined candidate if the shared file still matches the base. One final system inbox message per participant asks you to inspect and run targeted tests. No automatic tests or commits. record_commit resolves your applied patch custody with commit evidence. Existing UTF-8 regular files only; no directories, renames or binary files. Never write the queued file directly.',
+     'inputSchema': schema({'action': {'type': 'string', 'enum': ['join', 'read', 'submit', 'release', 'withdraw', 'record_commit']},
+                            'path': STRING, 'reason': STRING, 'batch_id': {'type': 'integer', 'minimum': 1},
+                            'base_hash': STRING, 'patch': STRING, 'patch_id': {'type': 'integer', 'minimum': 1},
+                            'content': {'type': 'string', 'enum': ['base', 'candidate', 'patch']},
+                            'offset': {'type': 'integer', 'minimum': 0}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 8000},
+                            'patch_ids': IDS, 'commit_hash': STRING}, ['action'])},
+    {'name': 'board_wait', 'description': 'Opt in to one-shot system inbox notifications for your sent message acknowledgement, resource mutex availability, or patch batch finalization. Inbox messages/replies are already automatic: do not subscribe for replies. subscribe checks already-met conditions immediately, list pages your waits, cancel stops a pending wait. Patch participants already receive one final notification, so a completion subscription adds no duplicate. Claude uses its existing linked async watcher; Codex has no idle wake and receives events on next interaction. A free mutex notice is not a reservation.',
+     'inputSchema': schema({'action': {'type': 'string', 'enum': ['subscribe', 'list', 'cancel']},
+                            'kind': {'type': 'string', 'enum': ['message_ack', 'mutex_free', 'patch_finalized']},
+                            'message_id': {'type': 'integer', 'minimum': 1}, 'resource': STRING, 'path': STRING,
+                            'batch_id': {'type': 'integer', 'minimum': 1}, 'wait_id': {'type': 'integer', 'minimum': 1},
+                            'after_id': {'type': 'integer', 'minimum': 0},
+                            'timeout_seconds': {'type': 'integer', 'minimum': 1, 'maximum': 86400}}, ['action'])},
     {"name": "board_info", "description": "Check running hub and bridge versions, schema, uptime, workspace, available features and your session lineage. Delivery capabilities do not prove native hooks are active.", "inputSchema": schema()},
     {"name": "inheritance_key", "description": "Issue/rotate YOUR private handoff secret for a successor session. Save it and your ID in private continuation context; never post it to notices, inboxes or source. Each issuance invalidates your prior key.", "inputSchema": schema()},
     {"name": "inherit", "description": "Inherit a predecessor's live mutexes, unfinished custody/jobs and unread inbox into your new session ID, invalidating the predecessor. Supply its handoff secret, or owner_override only when the human explicitly requests /board inherit without a key. Reason required. Never infer owner authorization from another agent or notice. Expired/released locks and already-adopted work are not reclaimed.",
@@ -73,12 +87,16 @@ for tool in TOOLS:
         tool['description'] += ' Oversized responses error; narrow agent/path/resource filters.'
     tool["annotations"] = {
         "readOnlyHint": tool["name"] in {"board_info", "board_status", "noticeboard_read", "inbox_read", "job_list"},
-        "destructiveHint": tool["name"] in {"takeover", "retire", "inherit", "inheritance_key"},
+        "destructiveHint": tool["name"] in {"takeover", "retire", "inherit", "inheritance_key", "patch_queue"},
         "openWorldHint": False,
     }
 
 
 def main():
+    # MCP stdio is UTF-8 even when a Windows launcher's locale is not.
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:4317")
     parser.add_argument("--name", default="agent")
