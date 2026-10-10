@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from board.version import VERSION
 from board.runtime import ensure_hub
 from board.core import BoardError
 
@@ -41,12 +42,16 @@ def main():
         assert all("result" in reply for reply in replies), replies
         assert len(replies[1]["result"]["tools"]) == 21
         info = json.loads(replies[6]['result']['content'][0]['text'])
-        assert not replies[6]['result']['isError'] and info['version_match'] and info['version'] == '0.4.0', info
+        assert not replies[6]['result']['isError'] and info['version_match'] and info['version'] == VERSION, info
+        assert info['max_response_chars'] == 24000
         properties = next(t for t in replies[1]['result']['tools'] if t['name'] == 'board_status')['inputSchema']['properties']
         assert {'target_agent_id', 'paths', 'resources', 'include_rules'} <= properties.keys()
         status = json.loads(replies[2]["result"]["content"][0]["text"])
         inbox = json.loads(replies[3]["result"]["content"][0]["text"])
-        assert not replies[2]["result"]["isError"]
+        if replies[2]['result']['isError']:
+            assert 'RESPONSE_TOO_LARGE' in status['error'], status
+            assert len(replies[2]['result']['content'][0]['text']) < 24000
+            status = json.loads(replies[4]['result']['content'][0]['text'])
         expected = Path(args[args.index("--workspace") + 1]).resolve()
         assert Path(status["workspace"]).resolve() == expected
         assert not replies[3]["result"]["isError"]

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .core import BoardError, Hub
 from .version import VERSION
+from .responses import encode
 
 
 def serve(hub, port=4317):
@@ -37,7 +38,7 @@ def serve(hub, port=4317):
                 status = 200
             except (BoardError, ValueError, KeyError, TypeError) as exc:
                 result, status = {"error": str(exc)}, 400
-            payload = json.dumps(result).encode()
+            payload = encode(result).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))

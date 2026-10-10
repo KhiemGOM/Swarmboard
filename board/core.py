@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from .rules import COORDINATION_RULES
 from .version import VERSION, SCHEMA_VERSION, FEATURES
+from .responses import check, page, MAX_RESPONSE_CHARS
 
 
 class BoardError(Exception):
@@ -118,9 +119,11 @@ class Hub:
                 from .inheritance import issue
                 handoff = issue(db, agent)
                 self.event(db, "registered", agent, {"name": name})
-                return {"agent_id": agent, "session_token": token, "workspace": str(self.workspace),
+                result = {"agent_id": agent, "session_token": token, "workspace": str(self.workspace),
                         "inheritance_secret": handoff,
                         "instructions": COORDINATION_RULES}
+                check(method, result)
+                return result
             agent = params.get("agent_id")
             identity = db.execute("SELECT * FROM agents WHERE id=?", (agent,)).fetchone()
             if not identity or not secrets.compare_digest(identity["token"], str(params.get("session_token", ""))):
@@ -143,7 +146,11 @@ class Hub:
             owned = db.execute("SELECT id,expires FROM jobs WHERE state='CLAIMED' AND owner=?", (agent,)).fetchall()
             if owned:
                 result['job_reminder'] = 'You own unfinished jobs. Use job_update to save progress and renew leases; job_finish with evidence or job_yield with a handoff. Job ownership does not grant file/resource locks.'
-                result['owned_jobs'] = [dict(r) for r in owned]
+                result['owned_jobs'] = [dict(r) for r in owned[:10]]
+                result['owned_jobs_count'] = len(owned)
+                if len(owned) > 10:
+                    result['job_reminder'] += ' Only the first 10 reminders are shown; use job_list with state=CLAIMED and pagination for details.'
+            check(method, result)
             return result
 
     def dispatch(self, db, method, p, agent, now):
@@ -152,6 +159,7 @@ class Hub:
             return {'service': 'swarmboard', 'version': VERSION, 'schema_version': SCHEMA_VERSION,
                     'workspace': str(self.workspace), 'started_at': self.started_at,
                     'uptime_seconds': max(0, now - self.started_at), 'features': FEATURES,
+                    'max_response_chars': MAX_RESPONSE_CHARS,
                     'lineage': dict(identity), 'inheritance_secret_ready': bool(db.execute('SELECT inheritance_hash FROM agents WHERE id=?', (agent,)).fetchone()[0]),
                     'inbox_delivery': {'claude': 'asyncRewake watcher plus tool/prompt previews; requires installed, linked hooks',
                                        'codex': 'tool/prompt previews; no idle wake'}}
@@ -266,9 +274,11 @@ class Hub:
             self.event(db, method, agent, {"id": cursor.lastrowid})
             return {"id": cursor.lastrowid}
         if method == "noticeboard_read":
-            return {"posts": [dict(r) for r in db.execute("SELECT * FROM posts WHERE id>? ORDER BY id LIMIT 100", (p.get("after_id", 0),))]}
+            after, limit = page(p)
+            return {"posts": [dict(r) for r in db.execute("SELECT * FROM posts WHERE id>? ORDER BY id LIMIT ?", (after, limit))]}
         if method == "inbox_read":
-            return {"messages": [dict(r) for r in db.execute("SELECT * FROM messages WHERE recipient=? AND acknowledged IS NULL ORDER BY id LIMIT 100", (agent,))]}
+            after, limit = page(p)
+            return {"messages": [dict(r) for r in db.execute("SELECT * FROM messages WHERE recipient=? AND acknowledged IS NULL AND id>? ORDER BY id LIMIT ?", (agent, after, limit))]}
         if method == "inbox_ack":
             ids = p.get("message_ids")
             if not isinstance(ids, list) or not ids or any(type(i) is not int for i in ids):

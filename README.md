@@ -154,7 +154,7 @@ python run_board.py cli --session .board/owner.json job_list
 
 Call `board_info` (or `/board version`) for the running hub version, MCP bridge
 version, compatibility match, schema, uptime, workspace, capabilities and your
-session lineage. Current release: **0.4.0**. Restart the daemon for hub updates
+session lineage. Current release: **0.4.1**. Restart the daemon for hub updates
 and reload MCP connections for bridge/tool updates. Capabilities describe
 available behavior; they do not certify that native hooks are linked and trusted.
 
@@ -184,6 +184,17 @@ explicit owner override. Never publish handoff secrets to source, notices or inb
 ## Inspect ownership without claiming
 
 `board_status` supports focused MCP queries:
+
+Tool responses are capped at **24,000 JSON characters** (Unicode is counted
+without ASCII escaping). Oversized hub results return `RESPONSE_TOO_LARGE`,
+with narrowing instructions, rather than a partial result. The call rolls back
+before committing mutations. For status, use `target_agent_id`, concrete `paths`
+or `resources`, and `include_rules=false`. For `noticeboard_read`, `inbox_read`
+and `job_list`, reduce `limit` (1–100) and page with `after_id` set to the last
+returned ID. Inbox reads never acknowledge messages. Job reminders show up to
+10 IDs with a total count; use job_list for the full list. `board_info` reports
+`max_response_chars`. The bridge also caps oversized legacy-hub results; its
+error warns that the old hub may already have committed a mutation.
 
 ```json
 {"target_agent_id": "self", "include_rules": false}

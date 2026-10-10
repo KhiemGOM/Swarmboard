@@ -7,6 +7,7 @@ from .client import call
 from .core import BoardError
 from .runtime import ensure_hub
 from .version import VERSION
+from .responses import encode, MAX_RESPONSE_CHARS
 
 
 def schema(properties=None, required=None):
@@ -62,6 +63,14 @@ TOOLS = [
     {"name": "inbox_ack", "description": "Acknowledge your messages after processing them.", "inputSchema": schema({"message_ids": IDS}, ["message_ids"])},
 ]
 for tool in TOOLS:
+    if tool['name'] in {'noticeboard_read', 'inbox_read', 'job_list'}:
+        tool['inputSchema']['properties'].update({
+            'after_id': {'type': 'integer', 'minimum': 0},
+            'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 100},
+        })
+        tool['description'] += ' If RESPONSE_TOO_LARGE, reduce limit and page using after_id=last returned ID.'
+    if tool['name'] == 'board_status':
+        tool['description'] += ' Oversized responses error; narrow agent/path/resource filters.'
     tool["annotations"] = {
         "readOnlyHint": tool["name"] in {"board_info", "board_status", "noticeboard_read", "inbox_read", "job_list"},
         "destructiveHint": tool["name"] in {"takeover", "retire", "inherit", "inheritance_key"},
@@ -80,7 +89,7 @@ def main():
     identity = None
 
     def send(message):
-        sys.stdout.write(json.dumps(message) + "\n")
+        sys.stdout.write(encode(message) + "\n")
         sys.stdout.flush()
 
     for line in sys.stdin:
@@ -126,7 +135,7 @@ def main():
                     if name == 'board_info':
                         output['bridge_version'] = VERSION
                         output['version_match'] = output['version'] == VERSION
-                    result = {"content": [{"type": "text", "text": json.dumps(output)}], "isError": False}
+                    result = {"content": [{"type": "text", "text": encode(output)}], "isError": False}
                 except BoardError as exc:
                     output = {"error": str(exc), "your_agent_id": identity["agent_id"]}
                     try:
@@ -141,7 +150,13 @@ def main():
                             output['owned_jobs'] = status['owned_jobs']
                     except BoardError:
                         pass
-                    result = {"content": [{"type": "text", "text": json.dumps(output)}], "isError": True}
+                    result = {"content": [{"type": "text", "text": encode(output)}], "isError": True}
+                # Also bound bridge additions and exceptions from an older hub.
+                if len(result['content'][0]['text']) > MAX_RESPONSE_CHARS:
+                    result = {'content': [{'type': 'text', 'text': encode({
+                        'error': 'RESPONSE_TOO_LARGE: tool output exceeds 24000 characters. Use narrower agent/path/resource filters or smaller limit/after_id pages. Hub may have completed the operation; inspect focused status before retrying mutations.',
+                        'your_agent_id': identity['agent_id'],
+                    })}], 'isError': True}
             elif method == "resources/list":
                 result = {"resources": []}
             elif method == "resources/templates/list":
