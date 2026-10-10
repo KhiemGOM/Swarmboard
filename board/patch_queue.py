@@ -73,7 +73,8 @@ def proposed(base, patch, path):
         raise BoardError('Use --- a/path and +++ b/path unified diff headers')
     for line, prefix in zip(lines[:2], ('a/', 'b/')):
         name = line[4:].rstrip('\r\n').split('\t')[0]
-        if name not in (path, prefix + path):
+        canonical = lambda value: os.path.normcase(value).replace('\\', '/')
+        if canonical(name) not in (canonical(path), canonical(prefix + path)):
             raise BoardError('Patch headers must identify the exact queued file; no rename or multiple files')
     source, output, cursor, index = base.splitlines(keepends=True), [], 0, 2
     edits = []
@@ -103,7 +104,8 @@ def proposed(base, patch, path):
             index += 1
         old = [text for kind, text in operations if kind != '+']
         new = [text for kind, text in operations if kind != '-']
-        if len(old) != old_count or len(new) != new_count or source[start:start + old_count] != old:
+        normalized = lambda values: [value.replace('\r\n', '\n') for value in values]
+        if len(old) != old_count or len(new) != new_count or normalized(source[start:start + old_count]) != normalized(old):
             raise BoardError('Patch context/count does not match the recorded base')
         # Keep the submitter's exact base positions. Re-diffing whole files can
         # relocate edits across repeated identical lines and hide a collision.
@@ -126,7 +128,21 @@ def proposed(base, patch, path):
         output.extend(new)
         cursor = start + old_count
     output.extend(source[cursor:])
-    result = ''.join(output)
+    # Context matching ignores CRLF/LF differences. Retain original bytes on
+    # untouched lines; replacements inherit their base lines' endings and new
+    # lines use the nearest base ending. No-newline markers remain meaningful.
+    def ending(value):
+        return '\r\n' if value.endswith('\r\n') else '\n' if value.endswith('\n') else None
+    fallback = next((ending(value) for value in source if ending(value)), '\n')
+    for edit in edits:
+        start, end, replacement = edit
+        nearby = (ending(source[start]) if start < len(source) else
+                  ending(source[start - 1]) if start else None) or fallback
+        for index, value in enumerate(replacement):
+            if value.endswith('\n'):
+                original = ending(source[start + index]) if start + index < end else None
+                replacement[index] = value.removesuffix('\n').removesuffix('\r') + (original or nearby)
+    result = compose(base, edits)
     if '\x00' in result or len(result.encode('utf-8')) > MAX_FILE:
         raise BoardError('Candidate must be UTF-8 text at most 1 MiB')
     return result, [edit for edit in edits if source[edit[0]:edit[1]] != edit[2]]

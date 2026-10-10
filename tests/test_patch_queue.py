@@ -194,6 +194,48 @@ class PatchQueueTests(unittest.TestCase):
         self.assertTrue(self.submit(self.a, batch, 'new\n' + self.base)['accepted'])
         self.assertFalse(self.submit(self.b, batch, 'other\n' + self.base)['accepted'])
 
+    def test_lf_diff_against_crlf_base_preserves_bytes_and_combines_patches(self):
+        self.file.write_bytes(self.base.replace('\n', '\r\n').encode())
+        batch = self.join(self.a)
+        self.join(self.b)
+        self.assertTrue(self.submit(self.a, batch, self.base.replace('one', 'ONE'))['accepted'])
+        self.assertTrue(self.submit(self.b, batch, self.base.replace('four', 'FOUR'))['accepted'])
+        self.queue(self.a, 'release', batch_id=batch['id'])
+        self.queue(self.b, 'release', batch_id=batch['id'])
+        self.assertEqual(self.file.read_bytes(), b'ONE\r\ntwo\r\nthree\r\nFOUR\r\n')
+
+    def test_crlf_diff_against_lf_base_and_mixed_endings(self):
+        from board.patch_queue import proposed
+        diff = '--- a/common.txt\r\n+++ b/common.txt\r\n@@ -1,3 +1,3 @@\r\n one\r\n-two\r\n+TWO\r\n three\r\n'
+        for original, expected in [('one\ntwo\nthree\n', 'one\nTWO\nthree\n'),
+                                   ('one\r\ntwo\nthree\r\n', 'one\r\nTWO\nthree\r\n')]:
+            self.assertEqual(proposed(original, diff, 'common.txt')[0], expected)
+
+    def test_new_lines_follow_base_style_and_no_newline_marker_is_preserved(self):
+        from board.patch_queue import proposed
+        diff = '--- a/common.txt\n+++ b/common.txt\n@@ -1 +1,2 @@\n one\n+new\n'
+        self.assertEqual(proposed('one\r\n', diff, 'common.txt')[0], 'one\r\nnew\r\n')
+        diff = '--- a/common.txt\n+++ b/common.txt\n@@ -1,2 +1,2 @@\n one\n-two\n\\ No newline at end of file\n+TWO\n\\ No newline at end of file\n'
+        self.assertEqual(proposed('one\r\ntwo', diff, 'common.txt')[0], 'one\r\nTWO')
+
+    def test_windows_header_casing_and_separators_without_accepting_other_files(self):
+        from board.patch_queue import proposed
+        diff = '--- a/COMMON.TXT\n+++ b\\Common.Txt\n@@ -1 +1 @@\n-one\n+ONE\n'
+        if os.name == 'nt':
+            self.assertEqual(proposed('one\n', diff, 'common.txt')[0], 'ONE\n')
+        else:
+            with self.assertRaises(BoardError):
+                proposed('one\n', diff, 'common.txt')
+        with self.assertRaises(BoardError):
+            proposed('one\n', diff.replace('COMMON.TXT', 'OTHER.TXT'), 'common.txt')
+
+    def test_newline_tolerance_does_not_hide_missing_newline_or_content_mismatch(self):
+        from board.patch_queue import proposed
+        diff = '--- a/common.txt\n+++ b/common.txt\n@@ -1 +1 @@\n-one\n+ONE\n'
+        for original in ('one', 'different\r\n'):
+            with self.assertRaisesRegex(BoardError, 'context/count'):
+                proposed(original, diff, 'common.txt')
+
     def test_age_survives_release_reclaim_and_new_work_resets(self):
         ids = self.call(self.a, 'claim', paths=['common.txt'], reason='edit')['claim_ids']
         with self.hub.connect() as db:

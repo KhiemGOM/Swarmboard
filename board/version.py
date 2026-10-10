@@ -1,4 +1,4 @@
-VERSION = '0.6.0'
+VERSION = '0.6.1'
 SCHEMA_VERSION = 4
 FEATURES = ['agent_status_filters', 'entity_inspection', 'resource_mutexes',
             'durable_custody', 'jobs', 'inbox_previews', 'claude_async_rewake',
