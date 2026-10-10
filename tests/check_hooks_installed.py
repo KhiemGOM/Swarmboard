@@ -1,6 +1,6 @@
 """Exercise saved hook commands with native-shaped payloads; no model turn or file edits."""
 import json
-import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +25,12 @@ def main():
             return reply['result']
         def event(name, **fields):
             handler = next(h for entry in hooks[name] for h in entry['hooks'] if 'swarmboard_hook.py' in h['command'] or any('swarmboard_hook.py' in str(arg) for arg in h.get('args', [])))
-            command = [handler['command'], *handler['args']] if 'args' in handler else handler['command'] if sys.platform == 'win32' else shlex.split(handler['command'])
+            if 'args' in handler:
+                command = [handler['command'], *handler['args']]
+            elif sys.platform == 'win32':
+                command = [shutil.which('pwsh') or 'powershell.exe', '-NoProfile', '-NonInteractive', '-Command', handler.get('commandWindows', handler['command'])]
+            else:
+                command = ['/bin/sh', '-c', handler['command']]
             result = subprocess.run(command,
                                     input=json.dumps({'session_id': harness + '-hook-payload-probe', 'cwd': workspace, 'hook_event_name': name, **fields}),
                                     capture_output=True, text=True, timeout=15, check=True)
@@ -44,7 +49,8 @@ def main():
             event('Stop')
             event('SessionEnd')
             print(json.dumps({'harness': harness, 'saved_hook_payloads': 'passed', 'unclaimed_edit': 'denied', 'unclaimed_git_index': 'denied', 'files_edited': False,
-                              'native_harness_dispatch': 'not exercised; Codex hook trust still requires review'}))
+                              'hook_launcher': 'direct argv' if harness == 'claude' else 'shell',
+                              'native_harness_dispatch': 'not exercised; review changed Codex definitions in /hooks'}))
         finally:
             process.stdin.close()
             process.wait(timeout=10)

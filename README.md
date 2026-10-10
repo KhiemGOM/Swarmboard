@@ -164,6 +164,10 @@ database. No extra agent is registered. Use the exact database and URL configure
 for MCP; add `--url` for a different port. Hooks ignore other workspaces.
 Codex requires review/trust of new hook definitions through `/hooks`; installed
 definitions are skipped until trusted. Its hooks feature must also be enabled.
+On Windows, Codex command hooks use PowerShell invocation and literal argument
+quoting (including paths with spaces). Claude uses its direct executable/args
+form. These are different launch formats; a successful direct Python run alone
+does not verify a Codex shell hook.
 
 `SessionStart` reinforces the routine. `PreToolUse` checks supported file edits
 (Claude Edit/Write/MultiEdit/NotebookEdit and Codex apply_patch), including patch
@@ -258,7 +262,8 @@ Optional checks:
 - `python tests/check_installed.py`: read-only checks through saved connections;
   registers test identities in the configured hub.
 - `python tests/check_hooks_installed.py`: invokes saved hook commands with
-  native-shaped payloads and confirms denied unclaimed edits/Git operations;
+  native-shaped payloads through PowerShell on Windows (a shell on Unix) for
+  Codex and direct argv for Claude, confirming denied unclaimed edits/Git operations;
   does not exercise native harness dispatch or spend model usage.
 - `python tests/probe_workspace.py --workspace /path/to/repo --path src/example.py`:
   uses simulated agents and isolated state, reads Git status, and does not edit

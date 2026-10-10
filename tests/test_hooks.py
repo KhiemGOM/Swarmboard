@@ -1,14 +1,29 @@
 import json
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from board.core import BoardError, Hub
 from board.hooks import Adapter, edit_paths
-from install_hooks import install
+from install_hooks import install, shell_command
 
 
 class HookTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows PowerShell launcher')
+    def test_windows_shell_preserves_arguments_stdin_and_exit_status(self):
+        shells = [path for name in ('powershell.exe', 'pwsh') if (path := shutil.which(name))]
+        self.assertTrue(shells)
+        argument = "C:/space dir/O'Brien/$literal`;file.json"
+        argv = [sys.executable, '-c', 'import json,sys; print(json.dumps([sys.argv[1],sys.stdin.read()])); sys.exit(7)', argument]
+        for shell in shells:
+            with self.subTest(shell=shell):
+                result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-Command', shell_command(argv, windows=True)], input='{"hook_event_name":"Stop"}', capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(json.loads(result.stdout), [argument, '{"hook_event_name":"Stop"}'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()

@@ -3,10 +3,18 @@ import argparse
 import json
 import shlex
 import shutil
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+
+def shell_command(argv, windows=False):
+    """Codex executes command hooks through a shell, not CreateProcess argv."""
+    if windows:
+        # PowerShell requires invocation syntax for a quoted executable. Single
+        # quotes also keep $, backticks and other shell syntax literal in paths.
+        return '& ' + ' '.join("'" + str(arg).replace("'", "''") + "'" for arg in argv) + '; exit $LASTEXITCODE'
+    return shlex.join(argv)
 
 
 def ours(handler):
@@ -54,7 +62,7 @@ def main():
     for harness, config in [('codex', args.codex_config), ('claude', args.claude_config)]:
         argv = [sys.executable, str(Path(__file__).resolve().with_name('swarmboard_hook.py')), '--harness', harness,
                 '--workspace', str(Path(args.workspace).resolve()), '--database', str(Path(args.database).resolve()), '--url', args.url]
-        command = subprocess.list2cmdline(argv) if sys.platform == 'win32' else shlex.join(argv)
+        command = shell_command(argv, windows=sys.platform == 'win32')
         install(config, argv[0] if harness == 'claude' else command, argv[1:] if harness == 'claude' else None)
         print(f'Installed {harness} Swarmboard hooks: {config}')
 
