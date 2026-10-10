@@ -1,0 +1,8 @@
+# Replace placeholders with absolute paths before installing.
+[mcp_servers.board]
+command = '/absolute/path/to/python'
+args = ['/absolute/path/to/swarmboard/run_board.py', 'mcp', '--name', 'codex', '--workspace', '/absolute/path/to/project', '--database', '/absolute/path/to/state/hub.sqlite', '--autostart']
+startup_timeout_sec = 15
+tool_timeout_sec = 15
+# Optional for a trusted local hub; applies only to this server.
+default_tools_approval_mode = "approve"

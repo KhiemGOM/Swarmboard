@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "board": {
+      "command": "/absolute/path/to/python",
+      "args": ["/absolute/path/to/swarmboard/run_board.py", "mcp", "--name", "claude-code", "--workspace", "/absolute/path/to/project", "--database", "/absolute/path/to/state/hub.sqlite", "--autostart"]
+    }
+  }
+}

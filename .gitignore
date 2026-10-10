@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.board/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.board-backup-*
