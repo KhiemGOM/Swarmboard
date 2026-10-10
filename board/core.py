@@ -5,6 +5,7 @@ import sqlite3
 import time
 from pathlib import Path
 from .rules import COORDINATION_RULES
+from .version import VERSION, SCHEMA_VERSION, FEATURES
 
 
 class BoardError(Exception):
@@ -23,6 +24,7 @@ class Hub:
     def __init__(self, database, workspace):
         self.workspace = Path(workspace).resolve()
         self.database = str(database)
+        self.started_at = time.time()
         Path(database).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
             db.executescript("""
@@ -50,6 +52,10 @@ class Hub:
             """)
             if "disconnected" not in {row[1] for row in db.execute("PRAGMA table_info(agents)")}:
                 db.execute("ALTER TABLE agents ADD COLUMN disconnected REAL")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(agents)')}
+            for name, kind in [('inheritance_hash', 'TEXT'), ('inherited_from', 'TEXT'), ('successor_id', 'TEXT'), ('inherited_at', 'REAL')]:
+                if name not in columns:
+                    db.execute(f'ALTER TABLE agents ADD COLUMN {name} {kind}')
             if "kind" not in {row[1] for row in db.execute("PRAGMA table_info(claims)")}:
                 db.execute("ALTER TABLE claims ADD COLUMN kind TEXT NOT NULL DEFAULT 'file'")
             for row in db.execute("SELECT * FROM claims WHERE active=1 AND kind='file' ORDER BY started").fetchall():
@@ -109,8 +115,11 @@ class Hub:
                 agent = secrets.token_hex(8)
                 token = secrets.token_urlsafe(32)
                 db.execute("INSERT INTO agents(id,name,token,state,started,seen,reason) VALUES (?,?,?,'active',?,?,NULL)", (agent, name, token, now, now))
+                from .inheritance import issue
+                handoff = issue(db, agent)
                 self.event(db, "registered", agent, {"name": name})
                 return {"agent_id": agent, "session_token": token, "workspace": str(self.workspace),
+                        "inheritance_secret": handoff,
                         "instructions": COORDINATION_RULES}
             agent = params.get("agent_id")
             identity = db.execute("SELECT * FROM agents WHERE id=?", (agent,)).fetchone()
@@ -138,6 +147,21 @@ class Hub:
             return result
 
     def dispatch(self, db, method, p, agent, now):
+        if method == 'board_info':
+            identity = db.execute('SELECT inherited_from,successor_id,inherited_at FROM agents WHERE id=?', (agent,)).fetchone()
+            return {'service': 'swarmboard', 'version': VERSION, 'schema_version': SCHEMA_VERSION,
+                    'workspace': str(self.workspace), 'started_at': self.started_at,
+                    'uptime_seconds': max(0, now - self.started_at), 'features': FEATURES,
+                    'lineage': dict(identity), 'inheritance_secret_ready': bool(db.execute('SELECT inheritance_hash FROM agents WHERE id=?', (agent,)).fetchone()[0]),
+                    'inbox_delivery': {'claude': 'asyncRewake watcher plus tool/prompt previews; requires installed, linked hooks',
+                                       'codex': 'tool/prompt previews; no idle wake'}}
+        if method == 'inheritance_key':
+            from .inheritance import issue
+            return {'inheritance_secret': issue(db, agent), 'predecessor_agent_id': agent,
+                    'instructions': 'Save your ID and this secret in private session handoff context. Issuing a key invalidates your previous key. Never publish it to notices, inboxes, source files or status reports. This proves possession of handoff context, not human identity.'}
+        if method == 'inherit':
+            from .inheritance import inherit
+            return inherit(self, db, p, agent, now)
         if method == 'retire':
             from .retirement import retire
             return retire(self, db, p.get('target_agent_id') or agent, p.get('reason'), agent, now)
@@ -160,7 +184,7 @@ class Hub:
                         raise BoardError(f'{key} must contain 1 to 100 concrete entries')
                     queries[key] = list(dict.fromkeys(normalize(value) for value in p[key]))
             values = (target,) if target is not None else ()
-            agents = [dict(r) for r in db.execute("SELECT id,name,state,started,seen,reason,disconnected FROM agents" +
+            agents = [dict(r) for r in db.execute("SELECT id,name,state,started,seen,reason,disconnected,inherited_from,successor_id,inherited_at FROM agents" +
                                                 (' WHERE id=?' if target is not None else '') + ' ORDER BY started', values)]
             for row in agents:
                 row['seconds_since_contact'] = max(0, now - row['seen'])
@@ -230,6 +254,14 @@ class Hub:
                 recipient = p.get("recipient_agent_id")
                 if not db.execute("SELECT 1 FROM agents WHERE id=?", (recipient,)).fetchone():
                     raise BoardError("Unknown recipient")
+                # Follow recorded succession so late replies reach the current session.
+                for _ in range(100):
+                    successor = db.execute('SELECT successor_id FROM agents WHERE id=?', (recipient,)).fetchone()[0]
+                    if not successor:
+                        break
+                    recipient = successor
+                else:
+                    raise BoardError('Inheritance chain exceeds supported length')
                 cursor = db.execute("INSERT INTO messages(sender,recipient,body,created) VALUES (?,?,?,?)", (agent, recipient, body, now))
             self.event(db, method, agent, {"id": cursor.lastrowid})
             return {"id": cursor.lastrowid}
