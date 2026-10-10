@@ -31,6 +31,19 @@ explicit reason. This immediately retires the old session and transfers all of
 its live claims to you. If your own session is retired, stop editing and start a
 new connection to register again. The hub preserves the takeover history.
 
-This prototype enforces claims inside the hub. Check-before-edit behavior is
-cooperative; edit hooks, usage detection, and push delivery
-will be added separately.
+Use job_post/job_list to share authorized work with acceptance criteria.
+job_claim reserves a task, not files/resources. Keep its lease_token; save
+progress and renew with job_update. Finish code jobs with job_finish using a
+commit hash, summary and recorded checks/evidence, or job_yield with a handoff.
+Noncode jobs need a deliverable summary and verification. Follow-ups can link
+to parent_job_id. Completion follows acceptance criteria and repository policy,
+not silence or a topic change. Finish/release are separate operations.
+
+Disconnected or expired jobs return to OPEN with prior progress intact. Existing
+file locks/custody remain until their normal release, expiry or explicit takeover.
+These signals do not independently prove death or quota exhaustion.
+
+Optional harness hooks reinforce supported file-edit and Git index checks and
+show handoff reminders. They bind to the existing MCP identity after board_status.
+Shell effects and specialized tool paths remain cooperative. Usage detection
+and push delivery are not implemented.

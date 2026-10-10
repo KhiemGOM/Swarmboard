@@ -4,7 +4,7 @@ A local coordination hub for multiple coding agents sharing one working director
 across different harnesses. Python 3.10+; no runtime dependencies.
 
 Each MCP connection gets an agent ID. Swarmboard provides atomic file/folder
-claims, named resource mutexes, durable commit custody, a shared noticeboard,
+claims, named resource mutexes, durable commit custody, a job board, a shared noticeboard,
 persistent inboxes and explicit takeover of an
 unavailable agent's claims. One local daemon owns SQLite state; stdio MCP bridges
 connect agents to it. The MCP connection and kickoff shortcut are named `board`.
@@ -106,12 +106,91 @@ retires its session and transfers live claims. Matching labels or inactivity
 alone do not prove identity or death. Reconnects register new IDs; old claims
 remain until expiry or takeover. Leases are not automatically renewed.
 
+## Job board
+
+Post work through MCP `job_post` or the CLI. Every job has a title, description
+and acceptance criteria. Jobs share information about authorized work; they do
+not grant permission to expand the owner's scope. A worker reserves an OPEN job
+with `job_claim`, then obtains separate file/resource locks. One worker wins
+concurrent claims. Save the returned `lease_token`: updates, handoff and completion
+require this token, preventing an expired worker from finishing a reassigned job.
+
+The default job lease is 30 minutes (maximum two hours). `job_update` saves progress
+and renews it; no background renewal silently holds work indefinitely. `job_yield`
+returns it to OPEN with a handoff. Finishing and yielding do not release file or
+resource locks; handle their custody separately.
+
+`job_finish` requires a result summary and check records. Code jobs also require
+`commit_hash`; noncode jobs can deliver a summary without a commit. Each check
+contains `command`, `result` (`passed` or `not_applicable`) and `evidence` (results,
+log/artifact references, or why a check does not apply). Failed checks cannot
+finish a job. Records persist alongside the reported commit; Swarmboard does not
+execute arbitrary commands or independently certify the commit or test evidence.
+
+Finish when the original acceptance criteria and repository commit policy are
+met. There is no need to wait for user silence. A topic change does not imply
+completion or authorize a commit. Additional work can be posted separately with
+`parent_job_id` linking it to the original job.
+
+Clean MCP stdin closure or a bound harness `SessionEnd` records disconnection and
+reopens unfinished jobs. Lease expiry recovers crashed or silent workers on the
+next successful hub call. Saved progress, previous owner, event history and file
+custody remain. Old sessions with unfinished custody but no job get a recovery
+review job after disconnection, file-lease expiry or explicit takeover. These
+jobs require inspecting the prior scope and changes, not blindly committing them.
+File locks still apply, and explicit takeover remains separate. A disconnected
+session can return, but must reclaim jobs with fresh tokens. Last hub contact is
+shown in status; it cannot distinguish thinking, quota exhaustion or a dead model.
+
+Quick posting with your own CLI session (separate from an MCP agent):
+
+```sh
+python run_board.py cli --session .board/owner.json register --params '{"name":"owner"}'
+python run_board.py cli --session .board/owner.json job_post --title "Fix login" --description "Repair the reported login failure" --acceptance "Login regression passes"
+python run_board.py cli --session .board/owner.json job_list
+```
+
+## Optional harness hooks
+
+```sh
+python install_hooks.py --workspace /absolute/path/to/project --database /absolute/path/to/state/hub.sqlite
+```
+
+This backs up and merges hooks into `~/.codex/hooks.json` and Claude Code's
+`~/.claude/settings.json`, preserving other handlers and settings. Restart/reload
+the harness and call `board_status` first. Its `PostToolUse` hook binds the native
+session to the existing MCP identity, storing credentials privately next to the
+database. No extra agent is registered. Use the exact database and URL configured
+for MCP; add `--url` for a different port. Hooks ignore other workspaces.
+Codex requires review/trust of new hook definitions through `/hooks`; installed
+definitions are skipped until trusted. Its hooks feature must also be enabled.
+
+`SessionStart` reinforces the routine. `PreToolUse` checks supported file edits
+(Claude Edit/Write/MultiEdit/NotebookEdit and Codex apply_patch), including patch
+move destinations. Missing or expired claims are denied. Recognized Git index
+operations require `git:index`. Status/notices are refreshed before checks;
+inbox, custody and job reminders are included. `Stop` warns about unfinished work
+without forcing commits or blocking the user. `SessionEnd` reports disconnection.
+
+Shell writes and shared resources remain cooperative: hooks cannot infer every
+script's effects, Git aliases or writes by existing processes. Other editing MCPs
+and specialized/aggregate tool paths are not covered by the file guard. Binding
+requires a native `mcp__board__*` tool result; if a harness wraps calls in an
+aggregate tool, use its native board tool or coordinate explicitly. Codex hook
+payloads use the parent's session ID for subagents; this adapter does not establish
+separate subagent identities. Desktop availability depends on its embedded harness.
+See [Codex hooks](https://learn.chatgpt.com/docs/hooks) and
+[Claude Code hooks](https://code.claude.com/docs/en/hooks).
+
 ## Interfaces and verification
 
 Tools: `board_status`, `claim`, `release`, `takeover`, `noticeboard_read`,
 `mutex_claim`, `custody_resolve`, `noticeboard_post`, `inbox_send`, `inbox_read`,
 `inbox_ack`. Unread messages persist until acknowledged. Agent messages do not
 supply human-owner authorization.
+
+Job tools: `job_post`, `job_list`, `job_claim`, `job_update`, `job_yield`,
+`job_finish`. CLI also offers `heartbeat` and `disconnect`.
 
 A CLI is also available. Each agent needs its own private session credential file:
 
@@ -130,6 +209,9 @@ Optional checks:
 
 - `python tests/check_installed.py`: read-only checks through saved connections;
   registers test identities in the configured hub.
+- `python tests/check_hooks_installed.py`: invokes saved hook commands with
+  native-shaped payloads and confirms denied unclaimed edits/Git operations;
+  does not exercise native harness dispatch or spend model usage.
 - `python tests/probe_workspace.py --workspace /path/to/repo --path src/example.py`:
   uses simulated agents and isolated state, reads Git status, and does not edit
   source files.
@@ -139,7 +221,7 @@ Optional checks:
 ## Prototype boundaries
 
 Claims are authoritative inside the hub. Check-before-edit remains cooperative;
-editor hooks and OS-level write protection are not installed. The hub assumes
+optional command hooks add guardrails, not OS-level write protection. The hub assumes
 trusted local processes: registration is open, and session tokens prevent
 accidental identity mixing rather than hostile local access. Takeover does not
 independently verify death.
@@ -149,5 +231,5 @@ Push delivery and sampling are not implemented. Activity measures hub calls,
 not model availability. Event history is ordinary SQLite data; notices have
 no Markdown mirror.
 
-Planned: owner-authorized bypass, usage/liveness retirement, edit hooks and
-optional push adapters.
+Planned: owner-authorized bypass, quota detection, configurable evidence validation
+and optional push adapters.

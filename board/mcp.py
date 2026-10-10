@@ -15,6 +15,19 @@ def schema(properties=None, required=None):
 STRING = {"type": "string"}
 IDS = {"type": "array", "items": {"type": "integer"}, "minItems": 1}
 TOOLS = [
+    {"name": "job_post", "description": "Post authorized available work with acceptance criteria. Follow-ups can be linked jobs; posting never grants human authorization.",
+     "inputSchema": schema({"title": STRING, "description": STRING, "acceptance": STRING, "kind": {"type": "string", "enum": ["code", "noncode"]}, "parent_job_id": {"type": "integer"}}, ["title", "description", "acceptance"])},
+    {"name": "job_list", "description": "List jobs. Expired leases reopen work without releasing file locks or declaring an agent dead.",
+     "inputSchema": schema({"state": {"type": "string", "enum": ["OPEN", "CLAIMED", "DONE"]}, "after_id": {"type": "integer", "minimum": 0}})},
+    {"name": "job_claim", "description": "Atomically reserve an OPEN job. Save lease_token; acquire separate file/resource locks before editing.",
+     "inputSchema": schema({"job_id": {"type": "integer"}, "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 7200}}, ["job_id"])},
+    {"name": "job_update", "description": "Save progress and renew your job lease. Requires its current lease_token.",
+     "inputSchema": schema({"job_id": {"type": "integer"}, "lease_token": STRING, "progress": STRING, "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 7200}}, ["job_id", "lease_token", "progress"])},
+    {"name": "job_yield", "description": "Return your job to OPEN with a handoff. File/resource locks and custody remain separate.",
+     "inputSchema": schema({"job_id": {"type": "integer"}, "lease_token": STRING, "reason": STRING}, ["job_id", "lease_token", "reason"])},
+    {"name": "job_finish", "description": "Finish when acceptance criteria are met. Code jobs require commit_hash and checks; noncode jobs need deliverable summary and checks. Evidence is agent-reported. Topic changes never automatically finish jobs.",
+     "inputSchema": schema({"job_id": {"type": "integer"}, "lease_token": STRING, "summary": STRING, "commit_hash": STRING,
+                            "checks": {"type": "array", "minItems": 1, "maxItems": 30, "items": schema({"command": STRING, "result": {"type": "string", "enum": ["passed", "not_applicable"]}, "evidence": STRING}, ["command", "result", "evidence"])}}, ["job_id", "lease_token", "summary", "checks"])},
     {"name": "board_status", "description": "Read latest agents and mutex claims before work. Includes your agent ID and unread inbox reminder.", "inputSchema": schema()},
     {"name": "claim", "description": "Atomically claim concrete files/folders before editing. Conflicting claims are refused. Read noticeboard first.",
      "inputSchema": schema({"paths": {"type": "array", "items": STRING, "minItems": 1}, "reason": STRING,
@@ -38,7 +51,7 @@ TOOLS = [
 ]
 for tool in TOOLS:
     tool["annotations"] = {
-        "readOnlyHint": tool["name"] in {"board_status", "noticeboard_read", "inbox_read"},
+        "readOnlyHint": tool["name"] in {"board_status", "noticeboard_read", "inbox_read", "job_list"},
         "destructiveHint": tool["name"] == "takeover",
         "openWorldHint": False,
     }
@@ -78,7 +91,7 @@ def main():
                 requested_version = params.get("protocolVersion")
                 supported = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
                 result = {"protocolVersion": requested_version if requested_version in supported else "2025-11-25", "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "swarmboard", "version": "0.2.0"},
+                          "serverInfo": {"name": "swarmboard", "version": "0.3.0"},
                           "instructions": f"Your board agent ID is {identity['agent_id']}. " + identity["instructions"]}
             elif method == "ping":
                 result = {}
@@ -108,6 +121,9 @@ def main():
                             output["inbox_reminder"] = status["inbox_reminder"]
                         if "custody_reminder" in status:
                             output["custody_reminder"] = status["custody_reminder"]
+                        if 'job_reminder' in status:
+                            output['job_reminder'] = status['job_reminder']
+                            output['owned_jobs'] = status['owned_jobs']
                     except BoardError:
                         pass
                     result = {"content": [{"type": "text", "text": json.dumps(output)}], "isError": True}
@@ -124,6 +140,14 @@ def main():
         except (BoardError, ValueError, KeyError, TypeError) as exc:
             send({"jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None,
                   "error": {"code": -32603, "message": str(exc)}})
+
+    # EOF means this bridge lost its harness connection, not that the model died.
+    if identity:
+        try:
+            call(args.url, 'disconnect', {'agent_id': identity['agent_id'], 'session_token': identity['session_token'],
+                                         'reason': 'MCP bridge stdin closed; unfinished jobs returned to the board'})
+        except BoardError:
+            pass  # A killed bridge/offline hub is recovered by job lease expiry.
 
 
 if __name__ == "__main__":

@@ -107,7 +107,7 @@ class HubTests(unittest.TestCase):
             for process in processes:
                 initialized = rpc(process, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}})
                 self.assertEqual(initialized["serverInfo"]["name"], "swarmboard")
-                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 11)
+                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 17)
             first, second = processes
             a = tool(first, "board_status")["your_agent_id"]
             b = tool(second, "board_status")["your_agent_id"]
@@ -121,8 +121,16 @@ class HubTests(unittest.TestCase):
             self.assertFalse(tool(second, "mutex_claim", {"resources": ["db:shared_test"], "reason": "other tests"})["accepted"])
             tool(first, "release", {"claim_ids": resource["claim_ids"], "reason": "tests finished"})
             message = tool(first, "inbox_send", {"recipient_agent_id": b, "body": "handoff"})
+            posted = tool(first, 'job_post', {'title': 'Probe job', 'description': 'Authorized simulation', 'acceptance': 'Probe passes'})['job']
+            owned = tool(first, 'job_claim', {'job_id': posted['id']})['job']
+            self.assertFalse(tool(second, 'job_claim', {'job_id': posted['id']})['accepted'])
+            tool(first, 'job_update', {'job_id': posted['id'], 'lease_token': owned['lease_token'], 'progress': 'Probe checks passed'})
             self.assertIn("inbox_reminder", tool(second, "board_status"))
-            tool(second, "takeover", {"target_agent_id": a, "reason": "First probe is dead"})
+            transferred = tool(second, "takeover", {"target_agent_id": a, "reason": "First probe is dead"})
+            resumed = transferred['jobs'][0]
+            done = tool(second, 'job_finish', {'job_id': posted['id'], 'lease_token': resumed['lease_token'], 'summary': 'Probe finished',
+                        'commit_hash': 'abcdef0', 'checks': [{'command': 'probe', 'result': 'passed', 'evidence': 'Simulated checks'}]})
+            self.assertEqual(done['job']['state'], 'DONE')
             retired = rpc(first, "tools/call", {"name": "board_status"})
             self.assertTrue(retired["isError"])
             self.assertEqual(tool(second, "inbox_ack", {"message_ids": [message["id"]]})["unread_inbox"], 0)
@@ -130,6 +138,8 @@ class HubTests(unittest.TestCase):
             self.assertIn("custody_reminder", tool(second, "board_status"))
             tool(second, "custody_resolve", {"paths": ["src"], "commit_hash": "abcdef0"})
             self.assertNotIn("custody_reminder", tool(second, "board_status"))
+            unfinished = tool(second, 'job_post', {'title': 'Unfinished probe', 'description': 'Recovery simulation', 'acceptance': 'Probe passes'})['job']
+            tool(second, 'job_claim', {'job_id': unfinished['id']})
         finally:
             for process in processes:
                 process.stdin.close()
@@ -143,6 +153,9 @@ class HubTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM jobs WHERE title='Unfinished probe'").fetchone()[0], 'OPEN')
+            self.assertIsNotNone(db.execute('SELECT disconnected FROM agents WHERE id=?', (b,)).fetchone()[0])
 
 
 if __name__ == "__main__":

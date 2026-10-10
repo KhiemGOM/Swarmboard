@@ -12,11 +12,22 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:4317")
     parser.add_argument("--session", default=".board/session.json")
     parser.add_argument("operation", choices=["register"] + [
-        "board_status", "heartbeat", "claim", "release", "takeover", "noticeboard_read", "noticeboard_post", "inbox_send", "inbox_read", "inbox_ack"])
+        "board_status", "heartbeat", "disconnect", "claim", "mutex_claim", "release", "custody_resolve", "takeover", "noticeboard_read", "noticeboard_post", "inbox_send", "inbox_read", "inbox_ack",
+        "job_post", "job_list", "job_claim", "job_update", "job_yield", "job_finish"])
     parser.add_argument("--params", default="{}", help="JSON arguments")
+    parser.add_argument("--title", help="Quick job_post title")
+    parser.add_argument("--description", help="Quick job_post description")
+    parser.add_argument("--acceptance", help="Quick job_post acceptance criteria")
     args = parser.parse_args()
     try:
         params = json.loads(args.params)
+        if not isinstance(params, dict):
+            raise BoardError('params must be a JSON object')
+        for key in ('title', 'description', 'acceptance'):
+            if getattr(args, key) is not None:
+                if args.operation != 'job_post':
+                    raise BoardError(f'--{key} is only for job_post')
+                params[key] = getattr(args, key)
         session_path = Path(args.session)
         if args.operation == "register":
             if session_path.exists():

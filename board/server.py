@@ -12,7 +12,7 @@ def serve(hub, port=4317):
             if self.path != "/health" or self.headers.get("Origin"):
                 self.send_error(404)
                 return
-            payload = json.dumps({"service": "agent-board", "version": "0.2.0", "workspace": str(hub.workspace)}).encode()
+            payload = json.dumps({"service": "agent-board", "version": "0.3.0", "workspace": str(hub.workspace)}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))

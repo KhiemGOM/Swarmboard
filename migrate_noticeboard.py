@@ -31,7 +31,7 @@ def migrate(hub, source, archive, limit=30, retire=False):
             ids = json.loads(previous[0])
         else:
             actor, now = secrets.token_hex(8), time.time()
-            db.execute("INSERT INTO agents VALUES (?, 'noticeboard-migration', ?, 'retired', ?, ?, 'One-time historical import')",
+            db.execute("INSERT INTO agents(id,name,token,state,started,seen,reason) VALUES (?, 'noticeboard-migration', ?, 'retired', ?, ?, 'One-time historical import')",
                        (actor, secrets.token_urlsafe(32), now, now))
             ids = []
             for offset, line in enumerate(tail, start=max(1, len(lines) - limit + 1)):
