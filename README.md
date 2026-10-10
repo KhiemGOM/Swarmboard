@@ -150,6 +150,34 @@ python run_board.py cli --session .board/owner.json job_post --title "Fix login"
 python run_board.py cli --session .board/owner.json job_list
 ```
 
+## Inspect ownership without claiming
+
+`board_status` supports focused MCP queries:
+
+```json
+{"target_agent_id": "self", "include_rules": false}
+{"target_agent_id": "EXACT_AGENT_ID", "include_rules": false}
+{"paths": ["src/example.py"], "include_rules": false}
+{"resources": ["git:index", "db:core_test"], "include_rules": false}
+```
+
+The agent filter applies to agents, active claims, custody and owned job counts.
+File queries match overlapping parent/child file or folder locks and custody;
+resource queries match exact IDs. Entity queries return only related holders,
+with `matches` showing each query's claim IDs and custody paths, even when empty.
+Combine paths/resources with an agent filter to narrow further. These queries
+do not acquire or renew mutexes or transfer custody. An empty result is a snapshot;
+obtain an accepted claim before writing. HELD custody remains visible after a
+mutex is released or its owner retires. Paths must stay inside the workspace.
+
+Omit filters for the existing workspace-wide view. `include_rules=false` skips
+repeated coordination rules. Workspace, caller identity and caller inbox/job
+reminders remain available regardless of whose entries are requested.
+`job_counts_scope` distinguishes caller/target job counts from workspace counts;
+path/resource queries do not filter jobs. Hooks automatically request self-only
+status without repeated rules. Existing MCP connections need reloading to discover
+the new arguments after updating the hub.
+
 ## Optional harness hooks
 
 ```sh

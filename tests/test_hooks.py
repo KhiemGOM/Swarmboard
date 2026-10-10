@@ -90,6 +90,18 @@ class HookTests(unittest.TestCase):
         self.event('PostToolUse', tool_name='mcp__other__tool', tool_response={'your_agent_id': self.agent['agent_id']})
         self.assertFalse((self.root / 'hook-sessions').exists())
 
+    def test_hooks_request_focused_status(self):
+        requests = []
+        def caller(url, method, params):
+            if method == 'board_status':
+                requests.append(params)
+            return self.hub.call(method, params)
+        self.adapter.caller = caller
+        self.bind()
+        self.event('Stop')
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(p['target_agent_id'] == 'self' and p['include_rules'] is False for p in requests))
+
     def test_inbox_surfaces_on_board_calls_and_blocked_edits_until_ack(self):
         sender = self.hub.call('register', {'name': 'Waiting peer'})
         message = self.hub.call('inbox_send', {**sender, 'recipient_agent_id': self.agent['agent_id'], 'body': 'Can you release the test DB? I am waiting.'})

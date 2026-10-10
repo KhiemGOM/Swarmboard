@@ -29,22 +29,36 @@ def main():
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "board_status", "arguments": {}}},
             {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "inbox_read", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "board_status", "arguments": {"target_agent_id": "self", "include_rules": False}}},
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "board_status", "arguments": {"resources": ["git:index"], "include_rules": False}}},
         ]
         result = subprocess.run([config["command"], *args], input="".join(json.dumps(r) + "\n" for r in requests),
                                 capture_output=True, text=True, timeout=25, cwd=Path.home())
         result.check_returncode()
         replies = [json.loads(line) for line in result.stdout.splitlines()]
-        assert len(replies) == 4, result.stderr
+        assert len(replies) == 6, result.stderr
         assert all("result" in reply for reply in replies), replies
         assert len(replies[1]["result"]["tools"]) == 18
+        properties = next(t for t in replies[1]['result']['tools'] if t['name'] == 'board_status')['inputSchema']['properties']
+        assert {'target_agent_id', 'paths', 'resources', 'include_rules'} <= properties.keys()
         status = json.loads(replies[2]["result"]["content"][0]["text"])
         inbox = json.loads(replies[3]["result"]["content"][0]["text"])
         assert not replies[2]["result"]["isError"]
         expected = Path(args[args.index("--workspace") + 1]).resolve()
         assert Path(status["workspace"]).resolve() == expected
         assert not replies[3]["result"]["isError"]
+        focused = json.loads(replies[4]['result']['content'][0]['text'])
+        entity = json.loads(replies[5]['result']['content'][0]['text'])
+        assert not replies[4]['result']['isError'], focused
+        assert [a['id'] for a in focused['agents']] == [status['your_agent_id']]
+        assert 'coordination_rules' not in focused
+        assert not replies[5]['result']['isError'], entity
+        assert entity['matches'][0]['query'] == 'git:index'
+        assert all(c['kind'] == 'resource' and c['path'] == 'git:index' for c in entity['claims'])
         ids.append(status["your_agent_id"])
-        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 18, "workspace": status["workspace"]}))
+        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 18, "workspace": status["workspace"],
+                          "workspace_status_chars": len(replies[2]['result']['content'][0]['text']),
+                          "self_status_chars": len(replies[4]['result']['content'][0]['text']), 'entity_query': 'passed'}))
     assert len(set(ids)) == len(ids)
     try:
         url = args[args.index("--url") + 1] if "--url" in args else "http://127.0.0.1:4317"

@@ -138,15 +138,56 @@ class Hub:
             from .retirement import retire
             return retire(self, db, p.get('target_agent_id') or agent, p.get('reason'), agent, now)
         if method in ("heartbeat", "board_status"):
-            agents = [dict(r) for r in db.execute("SELECT id,name,state,started,seen,reason,disconnected FROM agents ORDER BY started")]
+            target = p.get('target_agent_id')
+            if target is not None:
+                if not isinstance(target, str) or not target.strip():
+                    raise BoardError('target_agent_id must be self or an exact registered agent ID')
+                target = agent if target == 'self' else target
+                if not db.execute('SELECT 1 FROM agents WHERE id=?', (target,)).fetchone():
+                    raise BoardError('Unknown target_agent_id')
+            include_rules = p.get('include_rules', True)
+            if type(include_rules) is not bool:
+                raise BoardError('include_rules must be a boolean')
+            from .claims import resource
+            queries = {}
+            for key, normalize in (('paths', self.path), ('resources', resource)):
+                if key in p:
+                    if not isinstance(p[key], list) or not 1 <= len(p[key]) <= 100:
+                        raise BoardError(f'{key} must contain 1 to 100 concrete entries')
+                    queries[key] = list(dict.fromkeys(normalize(value) for value in p[key]))
+            values = (target,) if target is not None else ()
+            agents = [dict(r) for r in db.execute("SELECT id,name,state,started,seen,reason,disconnected FROM agents" +
+                                                (' WHERE id=?' if target is not None else '') + ' ORDER BY started', values)]
             for row in agents:
                 row['seconds_since_contact'] = max(0, now - row['seen'])
                 row['connection'] = 'disconnected' if row['disconnected'] else 'unknown'
-            claims = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1 ORDER BY id")]
-            custody = [dict(r) for r in db.execute("SELECT * FROM custody ORDER BY updated")]
-            return {"workspace": str(self.workspace), "agents": agents, "claims": claims,
-                    "custody": custody, "coordination_rules": COORDINATION_RULES,
-                    "job_counts": {r['state']: r['n'] for r in db.execute('SELECT state,COUNT(*) AS n FROM jobs GROUP BY state')}}
+            claims = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1" +
+                                                (' AND agent=?' if target is not None else '') + ' ORDER BY id', values)]
+            custody = [dict(r) for r in db.execute("SELECT * FROM custody" +
+                                                 (' WHERE owner=?' if target is not None else '') + ' ORDER BY updated', values)]
+            if queries:
+                claims = [row for row in claims if
+                          row['kind'] == 'file' and any(self.overlaps(row['path'], path) for path in queries.get('paths', [])) or
+                          row['kind'] == 'resource' and row['path'] in queries.get('resources', [])]
+                custody = [row for row in custody if any(self.overlaps(row['path'], path) for path in queries.get('paths', []))]
+                holders = {row['agent'] for row in claims} | {row['owner'] for row in custody}
+                agents = [row for row in agents if row['id'] in holders]
+            result = {"workspace": str(self.workspace), "agents": agents, "claims": claims,
+                      "custody": custody, "status_scope": target or 'workspace',
+                      "filters": {**queries, **({'target_agent_id': target} if target is not None else {})},
+                      "job_counts_scope": target or 'workspace',
+                      "job_counts": {r['state']: r['n'] for r in db.execute('SELECT state,COUNT(*) AS n FROM jobs' +
+                                   (' WHERE owner=?' if target is not None else '') + ' GROUP BY state', values)}}
+            if include_rules:
+                result['coordination_rules'] = COORDINATION_RULES
+            if queries:
+                result['matches'] = [
+                    {'kind': kind, 'query': value,
+                     'claim_ids': [row['id'] for row in claims if row['kind'] == kind and
+                                   (self.overlaps(row['path'], value) if kind == 'file' else row['path'] == value)],
+                     'custody_paths': [row['path'] for row in custody if kind == 'file' and self.overlaps(row['path'], value)]}
+                    for key, kind in (('paths', 'file'), ('resources', 'resource')) for value in queries.get(key, [])]
+            return result
         if method.startswith('job_'):
             from .jobs import dispatch
             return dispatch(self, db, method, p, agent, now)

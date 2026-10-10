@@ -30,7 +30,11 @@ TOOLS = [
     {"name": "job_finish", "description": "Finish when acceptance criteria are met. Code jobs require commit_hash and checks; noncode jobs need deliverable summary and checks. Evidence is agent-reported. Topic changes never automatically finish jobs.",
      "inputSchema": schema({"job_id": {"type": "integer"}, "lease_token": STRING, "summary": STRING, "commit_hash": STRING,
                             "checks": {"type": "array", "minItems": 1, "maxItems": 30, "items": schema({"command": STRING, "result": {"type": "string", "enum": ["passed", "not_applicable"]}, "evidence": STRING}, ["command", "result", "evidence"])}}, ["job_id", "lease_token", "summary", "checks"])},
-    {"name": "board_status", "description": "Read latest agents and mutex claims before work. Includes your agent ID and unread inbox reminder.", "inputSchema": schema()},
+    {"name": "board_status", "description": "Inspect ownership without claiming or renewing locks. target_agent_id=self or an exact ID shows that agent's entries and owned job counts. paths finds overlapping file/folder claims and custody; resources finds exact resource mutexes. Entity filters show only related holders and can combine with the agent filter. matches includes empty results for unheld queries; absence is a snapshot, not a reservation. Omit filters for workspace-wide coordination. include_rules=false skips repeated rules. Caller identity/inbox reminders always remain yours; job_counts_scope identifies whose jobs are counted.",
+     "inputSchema": schema({"target_agent_id": {"type": "string", "description": "self or an exact registered agent ID; filters results, never changes your identity"},
+                            "paths": {"type": "array", "items": STRING, "minItems": 1, "maxItems": 100, "description": "Concrete files/folders inside this workspace; matches parent and child locks"},
+                            "resources": {"type": "array", "items": STRING, "minItems": 1, "maxItems": 100, "description": "Exact resource IDs such as git:index, db:core_test or port:3101"},
+                            "include_rules": {"type": "boolean", "default": True}})},
     {"name": "claim", "description": "Atomically claim concrete files/folders before editing. Conflicting claims are refused. Read noticeboard first.",
      "inputSchema": schema({"paths": {"type": "array", "items": STRING, "minItems": 1}, "reason": STRING,
                             "resources": {"type": "array", "items": STRING, "minItems": 1},
@@ -117,7 +121,7 @@ def main():
                 except BoardError as exc:
                     output = {"error": str(exc), "your_agent_id": identity["agent_id"]}
                     try:
-                        status = call(args.url, "board_status", {"agent_id": identity["agent_id"], "session_token": identity["session_token"]})
+                        status = call(args.url, "board_status", {"agent_id": identity["agent_id"], "session_token": identity["session_token"], "target_agent_id": "self", "include_rules": False})
                         output["unread_inbox"] = status["unread_inbox"]
                         if "inbox_reminder" in status:
                             output["inbox_reminder"] = status["inbox_reminder"]

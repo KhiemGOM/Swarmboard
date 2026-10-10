@@ -93,7 +93,7 @@ class Adapter:
                 state = {'agent_id': agent, 'session_token': identity[0], 'after_id': state.get('after_id', 0)}
                 self.save(state_path, state)
                 auth = {k: state[k] for k in ('agent_id', 'session_token')}
-                status = self.caller(self.url, 'board_status', auth)
+                status = self.caller(self.url, 'board_status', {**auth, 'target_agent_id': 'self', 'include_rules': False})
                 notes = ['Swarmboard hooks linked to your MCP identity. File/resource claims remain required; check job_list for authorized available work.'] if first_link else []
                 inbox = self.inbox_context(status, auth)
                 if inbox:
@@ -115,7 +115,7 @@ class Adapter:
             return {}
         if event not in ('PreToolUse', 'Stop') or name.startswith('mcp__board__'):
             return {}
-        status = self.caller(self.url, 'board_status', auth)
+        status = self.caller(self.url, 'board_status', {**auth, 'target_agent_id': 'self', 'include_rules': False})
         if Path(status['workspace']).resolve() != self.workspace:
             raise BoardError('Hook connected to another workspace')
         notices = []
