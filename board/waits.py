@@ -28,7 +28,8 @@ def process(db, now):
                 path = entity['path']
                 def overlap(other):
                     return path == '.' or other == '.' or path == other or path.startswith(other + '/') or other.startswith(path + '/')
-                busy = any(overlap(row[0]) for row in db.execute("SELECT path FROM claims WHERE kind='file' AND active=1 AND expires>?", (now,)))
+                from .claims import intersects
+                busy = any(intersects(row, path) for row in db.execute("SELECT * FROM claims WHERE kind='file' AND active=1 AND expires>?", (now,)))
                 queued = any(overlap(row[0]) for row in db.execute("SELECT path FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')"))
                 done = not busy and not queued
         elif kind == 'patch_finalized':

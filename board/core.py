@@ -63,6 +63,8 @@ class Hub:
                     db.execute(f'ALTER TABLE agents ADD COLUMN {name} {kind}')
             if "kind" not in {row[1] for row in db.execute("PRAGMA table_info(claims)")}:
                 db.execute("ALTER TABLE claims ADD COLUMN kind TEXT NOT NULL DEFAULT 'file'")
+            if 'exclusions' not in {row[1] for row in db.execute('PRAGMA table_info(claims)')}:
+                db.execute("ALTER TABLE claims ADD COLUMN exclusions TEXT NOT NULL DEFAULT '[]'")
             for row in db.execute("SELECT * FROM claims WHERE active=1 AND kind='file' ORDER BY started").fetchall():
                 db.execute("INSERT OR IGNORE INTO custody VALUES (?,?,'ACTIVE',?,NULL,?)",
                            (row["path"], row["agent"], row["reason"], row["started"]))
@@ -221,6 +223,7 @@ class Hub:
             from .retirement import retire
             return retire(self, db, p.get('target_agent_id') or agent, p.get('reason'), agent, now)
         if method in ("heartbeat", "board_status"):
+            from .claims import intersects, exclusions
             target = p.get('target_agent_id')
             if target is not None:
                 if not isinstance(target, str) or not target.strip():
@@ -250,7 +253,7 @@ class Hub:
                                                  (' WHERE owner=?' if target is not None else '') + ' ORDER BY updated', values)]
             if queries:
                 claims = [row for row in claims if
-                          row['kind'] == 'file' and any(self.overlaps(row['path'], path) for path in queries.get('paths', [])) or
+                          row['kind'] == 'file' and any(intersects(row, path) for path in queries.get('paths', [])) or
                           row['kind'] == 'resource' and row['path'] in queries.get('resources', [])]
                 custody = [row for row in custody if any(self.overlaps(row['path'], path) for path in queries.get('paths', []))]
                 holders = {row['agent'] for row in claims} | {row['owner'] for row in custody}
@@ -266,6 +269,8 @@ class Hub:
                 age = db.execute('SELECT since FROM custody_age WHERE path=?', (row['path'],)).fetchone()
                 row['unresolved_since'] = age[0] if age else None
                 row['age_warning'] = row['state'] == 'HELD' and bool(age and now - age[0] >= 7200)
+            for row in claims:
+                row['exclusions'] = exclusions(row)
             result = {"workspace": str(self.workspace), "agents": agents, "claims": claims,
                       "custody": custody, "status_scope": target or 'workspace',
                       "filters": {**queries, **({'target_agent_id': target} if target is not None else {})},
@@ -287,7 +292,7 @@ class Hub:
                 result['matches'] = [
                     {'kind': kind, 'query': value,
                      'claim_ids': [row['id'] for row in claims if row['kind'] == kind and
-                                   (self.overlaps(row['path'], value) if kind == 'file' else row['path'] == value)],
+                                   (intersects(row, value) if kind == 'file' else row['path'] == value)],
                      'custody_paths': [row['path'] for row in custody if kind == 'file' and self.overlaps(row['path'], value)],
                      'patch_queue_ids': [row['id'] for row in result['patch_queues'] if kind == 'file' and self.overlaps(row['path'], value)]}
                     for key, kind in (('paths', 'file'), ('resources', 'resource')) for value in queries.get(key, [])]

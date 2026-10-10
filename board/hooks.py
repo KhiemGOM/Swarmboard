@@ -161,7 +161,8 @@ class Adapter:
                     queues = db.execute("SELECT id,path FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')").fetchall()
                 if any(target == row[1] or target.startswith(row[1] + '/') or row[1].startswith(target + '/') for row in queues):
                     return blocked('Swarmboard: this file has a patch queue lock. Submit a patch through patch_queue; direct edits are forbidden until finalization.')
-                if not any(row['kind'] == 'file' and (row['path'] == '.' or target == row['path'] or target.startswith(row['path'] + '/')) for row in claims):
+                from .claims import covers
+                if not any(row['kind'] == 'file' and covers(row, target) for row in claims):
                     return blocked(f'Swarmboard: acquire an accepted file claim for {path} before editing.')
         if event == 'PreToolUse' and name in ('Bash', 'exec_command'):
             command = arguments.get('command') or arguments.get('cmd', '')

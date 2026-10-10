@@ -212,7 +212,8 @@ def dispatch(hub, db, p, agent, now):
         if raw.resolve() != raw.absolute():
             raise BoardError('Use the canonical file path, without links or parent traversal')
         base = read_file(hub, path)
-        conflicts = [dict(r) for r in db.execute("SELECT id,agent,path FROM claims WHERE active=1 AND kind='file'") if hub.overlaps(path, r['path'])]
+        from .claims import intersects
+        conflicts = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1 AND kind='file'") if intersects(r, path)]
         if conflicts:
             return {'accepted': False, 'exclusive_claims': conflicts}
         batch = db.execute("SELECT * FROM patch_batches WHERE path=? AND state IN ('OPEN','READY','APPLYING')", (path,)).fetchone()

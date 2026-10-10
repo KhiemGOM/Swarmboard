@@ -1,6 +1,26 @@
 """Transactional path/resource claims and durable commit custody."""
 import re
+import json
 from .core import BoardError
+
+
+def exclusions(claim):
+    value = dict(claim).get('exclusions', [])
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def intersects(claim, path):
+    from .core import Hub
+    return Hub.overlaps(claim['path'], path) and not any(path == item or path.startswith(item + '/') for item in exclusions(claim))
+
+
+def covers(claim, path):
+    return (claim['path'] == '.' or path == claim['path'] or path.startswith(claim['path'] + '/')) and intersects(claim, path)
+
+
+def shared(a, b):
+    root = a['path'] if a['path'] != '.' and (b['path'] == '.' or len(a['path']) >= len(b['path'])) else b['path']
+    return intersects(a, root) and intersects(b, root)
 
 
 def commit(value):
@@ -24,6 +44,8 @@ def dispatch(hub, db, method, p, agent, now):
         if method == "mutex_claim" and (files or not resources):
             raise BoardError("mutex_claim accepts resources only")
         entities = list(dict.fromkeys([("file", hub.path(v)) for v in files] + [("resource", resource(v)) for v in resources]))
+        proposed = {(kind, path): db.execute('SELECT * FROM claims WHERE active=1 AND agent=? AND kind=? AND path=?',
+                    (agent, kind, path)).fetchone() or {'path': path, 'exclusions': []} for kind, path in entities}
         ttl = p.get("ttl_seconds", 7200)
         if not isinstance(ttl, (int, float)) or isinstance(ttl, bool) or not 1 <= ttl <= 7200:
             raise BoardError("ttl_seconds must be between 1 and 7200")
@@ -39,13 +61,13 @@ def dispatch(hub, db, method, p, agent, now):
         if new_hot:
             return {'accepted': False, 'queue_only_files': new_hot, 'reason': 'Queue-only policy: use patch_queue join; narrow folder claims to exclude these files.'}
         conflicts = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1 AND agent!=?", (agent,))
-                     if any(kind == r["kind"] and (hub.overlaps(path, r["path"]) if kind == "file" else path == r["path"])
+                     if any(kind == r["kind"] and (shared(proposed[kind, path], r) if kind == "file" else path == r["path"])
                             for kind, path in entities)]
         if conflicts:
             return {"accepted": False, "conflicts": conflicts,
                     'next_step': 'For a common file, use board_coordination request_relax with the exact file path and reason. Holder cooperation is required; do not edit or snapshot a queued patch behind a direct writer.'}
         queues = [dict(row) for row in db.execute("SELECT id,path,state FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')")
-                  if any(kind == 'file' and hub.overlaps(path, row['path']) for kind, path in entities)]
+                  if any(kind == 'file' and intersects(proposed[kind, path], row['path']) for kind, path in entities)]
         if queues:
             return {'accepted': False, 'patch_queue_conflicts': queues, 'reason': 'Patch queue lock forbids direct edits; join the queue or wait for finalization.'}
         ids = []
@@ -66,7 +88,11 @@ def dispatch(hub, db, method, p, agent, now):
                     db.execute('INSERT OR IGNORE INTO custody_age VALUES (?,?)', (path, now))
                 # Continuing overlapping unfinished work also accepts its custody.
                 for old in db.execute("SELECT path,owner FROM custody WHERE state!='COMMITTED'").fetchall():
-                    if hub.overlaps(path, old["path"]) and old["owner"] != agent:
+                    protected_elsewhere = any(not intersects(held, path) for held in db.execute(
+                        "SELECT * FROM claims WHERE active=1 AND kind='file' AND agent=? AND path=?", (old['owner'], old['path'])))
+                    if protected_elsewhere:
+                        continue  # A carved-out file does not transfer the remaining folder's custody.
+                    if intersects(proposed[kind, path], old["path"]) and old["owner"] != agent:
                         db.execute("UPDATE custody SET owner=?,updated=? WHERE path=?", (agent, now, old["path"]))
                         hub.event(db, "custody_transferred", agent, {"path": old["path"], "previous_owner": old["owner"]})
                 db.execute("INSERT INTO custody VALUES (?,?,'ACTIVE',?,NULL,?) ON CONFLICT(path) DO UPDATE SET owner=excluded.owner,state='ACTIVE',reason=excluded.reason,commit_hash=NULL,updated=excluded.updated",
@@ -100,7 +126,7 @@ def dispatch(hub, db, method, p, agent, now):
             if row["kind"] == "file":
                 for custody in db.execute("SELECT path FROM custody WHERE owner=? AND state!='COMMITTED'", (agent,)).fetchall():
                     path = custody["path"]
-                    if row["path"] == "." or path == row["path"] or path.startswith(row["path"] + "/"):
+                    if covers(row, path):
                         db.execute("UPDATE custody SET owner=?,state=?,reason=?,commit_hash=?,updated=? WHERE path=?",
                                    (agent, "COMMITTED" if sha else "HELD", held or "Commit evidence recorded", sha, now, path))
         hub.event(db, "released", agent, {"claim_ids": ids, "commit_hash": sha, "held_reason": held, "reason": reason})

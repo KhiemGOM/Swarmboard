@@ -1,10 +1,13 @@
 import json
 import hashlib
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from board.core import BoardError, Hub
+from board.hooks import Adapter
 
 
 class CoordinationTests(unittest.TestCase):
@@ -65,11 +68,91 @@ class CoordinationTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT state FROM custody').fetchone()[0], 'ACTIVE')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM patch_batches').fetchone()[0], 0)
 
-    def test_folder_claim_cannot_be_silently_relaxed(self):
+    def test_folder_carveout_keeps_other_and_future_files_protected(self):
+        folder = self.claim(self.a, '.')
+        with self.hub.connect() as db:
+            db.execute("UPDATE custody_age SET since=? WHERE path='.'", (time.time() - 7300,))
+        self.coord(self.b, 'request_relax')
+        result = self.coord(self.a, 'relax')
+        self.assertEqual(result['folder_claims_retained'], folder['claim_ids'])
+        self.assertEqual(len(self.messages(self.b)), 1)
+        self.assertFalse(self.claim(self.b, 'future.txt')['accepted'])
+        self.assertTrue(self.claim(self.a, '.')['accepted'])  # Renewal preserves exclusion.
+        self.assertFalse(self.claim(self.a)['accepted'])  # Queue prevents direct claim.
+        self.call(self.a, 'patch_queue', action='release', batch_id=result['batch']['id'])
+        status = self.call(self.a, 'board_status', paths=['common.txt'], include_rules=False)
+        self.assertEqual(status['matches'][0]['claim_ids'], [])
+        self.assertTrue(next(r for r in status['custody'] if r['path'] == 'common.txt')['age_warning'])
+        self.assertTrue(self.claim(self.b)['accepted'])
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute("SELECT owner FROM custody WHERE path='.'").fetchone()[0], self.a['agent_id'])
+            self.assertEqual(json.loads(db.execute('SELECT exclusions FROM claims WHERE id=?', (folder['claim_ids'][0],)).fetchone()[0]), ['common.txt'])
+
+    def test_folder_carveout_release_does_not_clear_separate_file_custody(self):
+        folder = self.claim(self.a, '.')
+        self.coord(self.a, 'relax')
+        self.call(self.a, 'release', claim_ids=folder['claim_ids'], commit_hash='a' * 40)
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM custody WHERE path='.'").fetchone()[0], 'COMMITTED')
+            self.assertEqual(db.execute("SELECT state FROM custody WHERE path='common.txt'").fetchone()[0], 'HELD')
+
+    def test_folder_requests_are_per_file_and_conversion_rolls_back_on_failure(self):
+        folder = self.claim(self.a, '.')
+        (self.root / 'other.txt').write_bytes(b'other\n')
+        self.coord(self.b, 'request_relax')
+        self.coord(self.b, 'request_relax', path='other.txt')
+        self.assertEqual(len(self.messages(self.a)), 2)
+        with patch('board.patch_queue.dispatch', side_effect=BoardError('conversion failed')):
+            with self.assertRaisesRegex(BoardError, 'conversion failed'):
+                self.coord(self.a, 'relax')
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT exclusions FROM claims WHERE id=?', (folder['claim_ids'][0],)).fetchone()[0], '[]')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM file_relax_requests').fetchone()[0], 2)
+        self.coord(self.a, 'relax')
+        self.assertEqual(len(self.messages(self.b)), 1)
+        self.coord(self.a, 'relax', path='other.txt')
+        self.assertEqual(len(self.messages(self.b)), 2)
+
+    def test_nested_own_claims_are_all_carved_and_folder_target_is_refused(self):
         self.claim(self.a, '.')
-        with self.assertRaisesRegex(BoardError, 'folder holders'):
-            self.coord(self.a, 'relax')
-        self.assertFalse(self.claim(self.b)['accepted'])
+        self.claim(self.a)
+        with self.assertRaises(BoardError):
+            self.coord(self.a, 'relax', path='.')
+        result = self.coord(self.a, 'relax')
+        self.assertEqual(len(result['claim_ids_affected']), 2)
+        self.assertTrue(self.call(self.b, 'patch_queue', action='join', path='common.txt', reason='Shared')['accepted'])
+
+    def test_carveout_survives_inheritance_and_waits_see_file_free_after_batch(self):
+        folder = self.claim(self.a, '.')
+        result = self.coord(self.a, 'relax')
+        self.call(self.c, 'board_wait', action='subscribe', kind='mutex_free', path='common.txt')
+        self.call(self.b, 'inherit', target_agent_id=self.a['agent_id'], inheritance_secret=self.a['inheritance_secret'], reason='Authorized successor')
+        self.call(self.b, 'patch_queue', action='release', batch_id=result['batch']['id'])
+        self.assertIn('is ready', self.messages(self.c)[0]['body'])
+        status = self.call(self.b, 'board_status', target_agent_id='self', include_rules=False)
+        self.assertEqual(status['claims'][0]['id'], folder['claim_ids'][0])
+        self.assertEqual(status['claims'][0]['exclusions'], ['common.txt'])
+        self.assertFalse(self.claim(self.c, 'future.txt')['accepted'])
+
+    def test_hook_refuses_carved_file_after_finalization_but_allows_folder_remainder(self):
+        self.claim(self.a, '.')
+        result = self.coord(self.a, 'relax')
+        self.call(self.a, 'patch_queue', action='release', batch_id=result['batch']['id'])
+        adapter = Adapter(self.root, self.root / 'hub.sqlite', 'claude', caller=lambda url, method, params: self.hub.call(method, params))
+        payload = {'session_id': 'native', 'cwd': str(self.root)}
+        adapter.handle({**payload, 'hook_event_name': 'PostToolUse', 'tool_name': 'mcp__board__board_status',
+                        'tool_response': {'your_agent_id': self.a['agent_id']}})
+        for file, denied in ((self.file, True), (self.root / 'future.txt', False)):
+            response = adapter.handle({**payload, 'hook_event_name': 'PreToolUse', 'tool_name': 'Write', 'tool_input': {'file_path': str(file)}})
+            self.assertEqual(response.get('hookSpecificOutput', {}).get('permissionDecision') == 'deny', denied)
+
+    def test_legacy_relax_requests_migrate_to_per_file_keys(self):
+        claim = self.claim(self.a)
+        with self.hub.connect() as db:
+            db.execute('CREATE TABLE relax_requests (claim_id INTEGER, requester TEXT, reason TEXT, created REAL, PRIMARY KEY(claim_id,requester))')
+            db.execute('INSERT INTO relax_requests VALUES (?,?,?,?)', (claim['claim_ids'][0], self.b['agent_id'], 'Legacy request', 1))
+        self.hub = Hub(self.root / 'hub.sqlite', self.root)
+        self.assertTrue(self.coord(self.b, 'request_relax')['duplicate'])
 
     def test_explicit_hot_files_block_files_and_covering_folders_but_not_resources(self):
         (self.root / '.swarmboard.json').write_text(json.dumps({'queue_only': ['common.txt']}))

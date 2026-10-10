@@ -9,13 +9,16 @@ from .core import BoardError
 
 def initialize(db):
     db.executescript('''
-        CREATE TABLE IF NOT EXISTS relax_requests (
-            claim_id INTEGER, requester TEXT, reason TEXT, created REAL,
-            PRIMARY KEY(claim_id,requester));
+        CREATE TABLE IF NOT EXISTS file_relax_requests (
+            claim_id INTEGER, requester TEXT, path TEXT, reason TEXT, created REAL,
+            PRIMARY KEY(claim_id,requester,path));
         CREATE TABLE IF NOT EXISTS coordination_incidents (
             id INTEGER PRIMARY KEY, fingerprint TEXT UNIQUE, path TEXT,
             kind TEXT, reporter TEXT, evidence TEXT, created REAL);
     ''')
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='relax_requests'").fetchone():
+        db.execute('INSERT OR IGNORE INTO file_relax_requests SELECT r.claim_id,r.requester,c.path,r.reason,r.created FROM relax_requests r JOIN claims c ON c.id=r.claim_id')
+        db.execute('DROP TABLE relax_requests')
 
 
 def hot_files(hub):
@@ -138,16 +141,19 @@ def dispatch(hub, db, p, agent, now):
         return {**incident(hub, db, path, 'reported_interference', json.dumps(evidence), reporter=agent,
                            signature=[before, after]), **evidence,
                 'custody_history': {'action': 'history', 'path': path}}
-    claims = [r for r in db.execute("SELECT * FROM claims WHERE active=1 AND kind='file'") if hub.overlaps(path, r['path'])]
-    if len(claims) != 1 or claims[0]['path'] != path:
-        raise BoardError('Relax needs one exact file claim; folder holders must narrow their claims first')
-    claim = claims[0]
+    from .claims import covers, exclusions
+    from .patch_queue import read_file
+    read_file(hub, path)  # Relax targets an existing regular file, not a folder.
+    claims = [r for r in db.execute("SELECT * FROM claims WHERE active=1 AND kind='file'") if covers(r, path)]
+    if not claims or len({r['agent'] for r in claims}) != 1:
+        raise BoardError('Relax needs a held file or covering folder claim from one holder')
+    claim = max(claims, key=lambda row: len(row['path']))
     if action == 'request_relax':
         if claim['agent'] == agent:
             raise BoardError('You own this claim; use relax after stopping direct writes')
-        exists = db.execute('SELECT 1 FROM relax_requests WHERE claim_id=? AND requester=?', (claim['id'], agent)).fetchone()
+        exists = db.execute('SELECT 1 FROM file_relax_requests WHERE claim_id=? AND requester=? AND path=?', (claim['id'], agent, path)).fetchone()
         if not exists:
-            db.execute('INSERT INTO relax_requests VALUES (?,?,?,?)', (claim['id'], agent, reason, now))
+            db.execute('INSERT INTO file_relax_requests VALUES (?,?,?,?,?)', (claim['id'], agent, path, reason, now))
             message(db, claim['agent'], f'Agent {agent} requests patch queue mode for {path}. Reason: {reason}. '
                     'If appropriate, stop direct edits and background writers, then run /board relax FILE. '
                     'Keep exclusive mode if currently required and explain the blocker via inbox. This request does not revoke your claim.', now)
@@ -157,15 +163,30 @@ def dispatch(hub, db, p, agent, now):
     if claim['agent'] != agent:
         raise BoardError('Only the claim holder can relax it')
     # Everything below commits together: no unlocked release/reclaim interval.
-    db.execute('UPDATE claims SET active=0 WHERE id=?', (claim['id'],))
-    db.execute("UPDATE custody SET state='HELD',reason=?,updated=? WHERE path=? AND owner=? AND state!='COMMITTED'",
-               ('Converted to patch queue: ' + reason, now, path, agent))
+    for held in claims:
+        if held['path'] == path:
+            db.execute('UPDATE claims SET active=0 WHERE id=?', (held['id'],))
+        else:
+            excluded = exclusions(held)
+            if len(excluded) >= 64:
+                raise BoardError('Folder carve-outs are limited to 64 files per claim; release/split the folder before adding more')
+            db.execute('UPDATE claims SET exclusions=? WHERE id=?', (json.dumps(excluded + [path]), held['id']))
+    prior = db.execute('SELECT state FROM custody WHERE path=?', (path,)).fetchone()
+    db.execute("INSERT INTO custody VALUES (?,?,'HELD',?,NULL,?) ON CONFLICT(path) DO UPDATE SET owner=excluded.owner,state='HELD',reason=excluded.reason,commit_hash=NULL,updated=excluded.updated",
+               (path, agent, 'Converted to patch queue: ' + reason, now))
+    if prior and prior['state'] == 'COMMITTED':
+        db.execute('DELETE FROM custody_age WHERE path=?', (path,))
+    ages = [db.execute('SELECT since FROM custody_age WHERE path=?', (r['path'],)).fetchone() for r in claims]
+    since = min(age[0] if age else held['started'] for age, held in zip(ages, claims))
+    db.execute('INSERT OR IGNORE INTO custody_age VALUES (?,?)', (path, since))
     from .patch_queue import dispatch as queue_dispatch
     result = queue_dispatch(hub, db, {'action': 'join', 'path': str(hub.workspace / path), 'reason': reason}, agent, now)
     if not result.get('accepted'):
         raise BoardError('Cannot convert claim to queue; exclusive claim retained')
     notified = 0
-    for row in db.execute('SELECT requester FROM relax_requests WHERE claim_id=?', (claim['id'],)).fetchall():
+    identifiers = [r['id'] for r in claims]
+    placeholders = ','.join('?' for _ in identifiers)
+    for row in db.execute(f'SELECT DISTINCT requester FROM file_relax_requests WHERE claim_id IN ({placeholders}) AND path=?', (*identifiers, path)).fetchall():
         recipient = row[0]
         # Follow successors without registering or impersonating another session.
         for _ in range(100):
@@ -176,7 +197,8 @@ def dispatch(hub, db, p, agent, now):
         if who and who['state'] == 'active':
             message(db, recipient, f'{path} is now patch queue #{result["batch"]["id"]}. Join explicitly and read its new base before preparing your patch; you have not been joined automatically.', now)
             notified += 1
-    db.execute('DELETE FROM relax_requests WHERE claim_id=?', (claim['id'],))
+    db.execute(f'DELETE FROM file_relax_requests WHERE claim_id IN ({placeholders}) AND path=?', (*identifiers, path))
     hub.event(db, 'claim_relaxed', agent, {'claim_id': claim['id'], 'batch_id': result['batch']['id']})
-    return {**result, 'relaxed_claim_id': claim['id'], 'requesters_notified': notified,
+    return {**result, 'relaxed_claim_id': claim['id'], 'claim_ids_affected': identifiers,
+            'folder_claims_retained': [r['id'] for r in claims if r['path'] != path], 'requesters_notified': notified,
             'custody': 'Existing saved work remains yours as HELD; resolve it with actual commit evidence. Future changes use queue patches.'}

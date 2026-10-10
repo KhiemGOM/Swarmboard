@@ -11,10 +11,15 @@ All product shortcuts use the board namespace: /board, /board mutex, /board queu
 (Codex: $board with the same arguments).
 
 For **relax FILE**, stop direct writes and background writers, then call
-board_coordination action=relax with the exact held file and a reason. It
-atomically converts your claim into patch queue participation. Current saved
+board_coordination action=relax with the file and a reason. An exact claim converts;
+a covering folder claim atomically excludes this file and keeps protecting the
+rest, including new files. No manual narrowing is needed. Current saved
 content becomes the base; existing uncommitted work remains your HELD custody.
 Future edits must be submitted as patches. Never relax another agent's claim.
+After finalization, the folder exclusion persists: acquire a fresh exact file
+claim before returning to direct edits. Status shows exclusions; folder renewal,
+inheritance and release preserve the separation. Whole-folder relaxation is not
+supported; target the actual common file. At most 64 carve-outs per folder claim.
 
 For **request-relax FILE**, call board_coordination action=request_relax with
 the exact file and why shared preparation is useful. This sends an inbox request
