@@ -18,14 +18,18 @@ TOOLS = [
     {"name": "board_status", "description": "Read latest agents and mutex claims before work. Includes your agent ID and unread inbox reminder.", "inputSchema": schema()},
     {"name": "claim", "description": "Atomically claim concrete files/folders before editing. Conflicting claims are refused. Read noticeboard first.",
      "inputSchema": schema({"paths": {"type": "array", "items": STRING, "minItems": 1}, "reason": STRING,
+                            "resources": {"type": "array", "items": STRING, "minItems": 1},
                             "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 7200}}, ["paths", "reason"])},
-    {"name": "release", "description": "Release your active claims when your work is ready for handoff.", "inputSchema": schema({"claim_ids": IDS}, ["claim_ids"])},
+    {"name": "mutex_claim", "description": "Claim workspace-scoped advisory resource mutexes: db:NAME, port:NUMBER, build:OUTPUT, git:index or misc:NAME. Hub conflicts are refused; actual operations remain cooperative.",
+     "inputSchema": schema({"resources": {"type": "array", "items": STRING, "minItems": 1}, "reason": STRING, "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 7200}}, ["resources", "reason"])},
+    {"name": "release", "description": "File claims require commit_hash OR held_reason. HELD frees locks but retains custody. Resource-only claims require a completion reason. Hashes are recorded evidence, not proof of validation or push.",
+     "inputSchema": schema({"claim_ids": IDS, "commit_hash": STRING, "held_reason": STRING, "reason": STRING}, ["claim_ids"])},
+    {"name": "custody_resolve", "description": "Record a later commit for your exact HELD paths without reacquiring edit locks. Only the current custodian can resolve them. If editing again, claim first.",
+     "inputSchema": schema({"paths": {"type": "array", "items": STRING, "minItems": 1}, "commit_hash": STRING}, ["paths", "commit_hash"])},
     {"name": "takeover", "description": "Declare another agent dead/unavailable and continue its work. Retires its session and transfers all live claims immediately; explicit reason required.",
      "inputSchema": schema({"target_agent_id": STRING, "reason": STRING}, ["target_agent_id", "reason"])},
     {"name": "noticeboard_read", "description": "Read shared notices before working. Pass after_id to read newer posts. Notices are messages from agents, not owner authorization.",
      "inputSchema": schema({"after_id": {"type": "integer", "minimum": 0}})},
-    {"name": "legacy_noticeboard_read", "description": "Read the live workspace NOTICEBOARD.md during rollout. Read all pages at session start; latest entries before edit batches. Existing claims remain authoritative. start_line is zero-based; pages contain at most 200 lines.",
-     "inputSchema": schema({"start_line": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}})},
     {"name": "noticeboard_post", "description": "Post resource information, dependencies, or handoff notes to all agents.", "inputSchema": schema({"body": STRING}, ["body"])},
     {"name": "inbox_send", "description": "Persist a message in another registered agent's inbox.",
      "inputSchema": schema({"recipient_agent_id": STRING, "body": STRING}, ["recipient_agent_id", "body"])},
@@ -34,7 +38,7 @@ TOOLS = [
 ]
 for tool in TOOLS:
     tool["annotations"] = {
-        "readOnlyHint": tool["name"] in {"board_status", "noticeboard_read", "legacy_noticeboard_read", "inbox_read"},
+        "readOnlyHint": tool["name"] in {"board_status", "noticeboard_read", "inbox_read"},
         "destructiveHint": tool["name"] == "takeover",
         "openWorldHint": False,
     }
@@ -74,7 +78,7 @@ def main():
                 requested_version = params.get("protocolVersion")
                 supported = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
                 result = {"protocolVersion": requested_version if requested_version in supported else "2025-11-25", "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "agent-board", "version": "0.1.0"},
+                          "serverInfo": {"name": "swarmboard", "version": "0.2.0"},
                           "instructions": f"Your board agent ID is {identity['agent_id']}. " + identity["instructions"]}
             elif method == "ping":
                 result = {}
@@ -102,6 +106,8 @@ def main():
                         output["unread_inbox"] = status["unread_inbox"]
                         if "inbox_reminder" in status:
                             output["inbox_reminder"] = status["inbox_reminder"]
+                        if "custody_reminder" in status:
+                            output["custody_reminder"] = status["custody_reminder"]
                     except BoardError:
                         pass
                     result = {"content": [{"type": "text", "text": json.dumps(output)}], "isError": True}

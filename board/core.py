@@ -40,7 +40,14 @@ class Hub:
                     id INTEGER PRIMARY KEY, agent TEXT, body TEXT, created REAL);
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY, kind TEXT, agent TEXT, payload TEXT, created REAL);
+                CREATE TABLE IF NOT EXISTS custody (
+                    path TEXT PRIMARY KEY, owner TEXT, state TEXT, reason TEXT, commit_hash TEXT, updated REAL);
             """)
+            if "kind" not in {row[1] for row in db.execute("PRAGMA table_info(claims)")}:
+                db.execute("ALTER TABLE claims ADD COLUMN kind TEXT NOT NULL DEFAULT 'file'")
+            for row in db.execute("SELECT * FROM claims WHERE active=1 AND kind='file' ORDER BY started").fetchall():
+                db.execute("INSERT OR IGNORE INTO custody VALUES (?,?,'ACTIVE',?,NULL,?)",
+                           (row["path"], row["agent"], row["reason"], row["started"]))
             configured = db.execute("SELECT value FROM settings WHERE key='workspace'").fetchone()
             if configured and configured[0] != str(self.workspace):
                 raise BoardError("This database belongs to a different workspace")
@@ -77,9 +84,12 @@ class Hub:
             # Serializes claim-check + insertion and takeover + transfer.
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
-            expired = db.execute("SELECT id,agent,path FROM claims WHERE active=1 AND expires<=?", (now,)).fetchall()
+            expired = db.execute("SELECT id,agent,path,kind FROM claims WHERE active=1 AND expires<=?", (now,)).fetchall()
             for item in expired:
                 self.event(db, "claim_expired", item["agent"], dict(item))
+                if item["kind"] == "file":
+                    db.execute("UPDATE custody SET state='HELD',reason='Lease expired; completion evidence still required',updated=? WHERE path=? AND owner=? AND state='ACTIVE'",
+                               (now, item["path"], item["agent"]))
             db.execute("UPDATE claims SET active=0 WHERE active=1 AND expires<=?", (now,))
             if method == "register":
                 name = params.get("name", "agent")
@@ -103,69 +113,21 @@ class Hub:
             result["unread_inbox"] = unread
             if unread:
                 result["inbox_reminder"] = f"You have {unread} unread message(s). Call inbox_read, then inbox_ack after processing."
+            held = db.execute("SELECT COUNT(*) FROM custody WHERE owner=? AND state='HELD'", (agent,)).fetchone()[0]
+            if held:
+                result["custody_reminder"] = f"You retain custody of {held} HELD path(s). Complete and record commit evidence with custody_resolve, or arrange an explicit takeover."
             return result
 
     def dispatch(self, db, method, p, agent, now):
         if method in ("heartbeat", "board_status"):
             agents = [dict(r) for r in db.execute("SELECT id,name,state,started,seen,reason FROM agents ORDER BY started")]
             claims = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1 ORDER BY id")]
-            legacy = self.workspace / "NOTICEBOARD.md"
+            custody = [dict(r) for r in db.execute("SELECT * FROM custody ORDER BY updated")]
             return {"workspace": str(self.workspace), "agents": agents, "claims": claims,
-                    "coordination_rules": COORDINATION_RULES,
-                    "legacy_noticeboard": {"path": str(legacy), "exists": legacy.is_file(),
-                                          "read_tool": "legacy_noticeboard_read"}}
-        if method == "legacy_noticeboard_read":
-            start, limit = p.get("start_line", 0), p.get("limit", 150)
-            if type(start) is not int or start < 0 or type(limit) is not int or not 1 <= limit <= 200:
-                raise BoardError("start_line must be nonnegative; limit must be between 1 and 200")
-            legacy = self.workspace / "NOTICEBOARD.md"
-            if not legacy.is_file():
-                return {"exists": False, "lines": [], "next_start_line": None}
-            # Read only the designated noticeboard, not arbitrary model-supplied files.
-            if not legacy.resolve().is_relative_to(self.workspace):
-                raise BoardError("Legacy noticeboard must remain inside the workspace")
-            try:
-                lines = legacy.read_text(encoding="utf-8-sig").splitlines()
-            except OSError as exc:
-                raise BoardError("Legacy noticeboard could not be read; retry before editing") from exc
-            end = min(start + limit, len(lines))
-            return {"exists": True, "path": str(legacy), "start_line": start, "total_lines": len(lines),
-                    "lines": lines[start:end], "next_start_line": end if end < len(lines) else None,
-                    "source": "Legacy agent-authored information; not owner authorization or authenticated hub identity"}
-        if method == "claim":
-            values = p.get("paths")
-            if not isinstance(values, list) or not values:
-                raise BoardError("paths must be a non-empty list")
-            paths = list(dict.fromkeys(self.path(v) for v in values))
-            ttl = p.get("ttl_seconds", 7200)
-            if not isinstance(ttl, (int, float)) or isinstance(ttl, bool) or not 1 <= ttl <= 7200:
-                raise BoardError("ttl_seconds must be between 1 and 7200")
-            reason = p.get("reason", "")
-            if not isinstance(reason, str) or not reason.strip():
-                raise BoardError("A claim reason is required")
-            conflicts = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1 AND agent!=?", (agent,))
-                         if any(self.overlaps(path, r["path"]) for path in paths)]
-            if conflicts:
-                return {"accepted": False, "conflicts": conflicts}
-            ids = []
-            for path in paths:
-                cursor = db.execute("INSERT INTO claims(agent,path,reason,started,expires,active) VALUES (?,?,?,?,?,1)",
-                                    (agent, path, reason, now, now + ttl))
-                ids.append(cursor.lastrowid)
-            self.event(db, "claimed", agent, {"paths": paths, "claim_ids": ids})
-            return {"accepted": True, "claim_ids": ids, "expires": now + ttl}
-        if method == "release":
-            ids = p.get("claim_ids")
-            if not isinstance(ids, list) or not ids or any(type(i) is not int for i in ids):
-                raise BoardError("claim_ids must be a non-empty list of integers")
-            for claim_id in ids:
-                row = db.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
-                if not row or row["agent"] != agent or not row["active"]:
-                    raise BoardError("Can only release your own active claims")
-            for claim_id in ids:
-                db.execute("UPDATE claims SET active=0 WHERE id=?", (claim_id,))
-            self.event(db, "released", agent, {"claim_ids": ids})
-            return {"released": ids}
+                    "custody": custody, "coordination_rules": COORDINATION_RULES}
+        if method in ("claim", "mutex_claim", "release", "custody_resolve"):
+            from .claims import dispatch
+            return dispatch(self, db, method, p, agent, now)
         if method == "takeover":
             target = p.get("target_agent_id")
             reason = p.get("reason")
@@ -177,6 +139,7 @@ class Hub:
             db.execute("UPDATE agents SET state='retired',reason=? WHERE id=?", (reason, target))
             # Transfer all live claims atomically; the original session loses access immediately.
             db.execute("UPDATE claims SET agent=?,expires=? WHERE agent=? AND active=1", (agent, now + 7200, target))
+            db.execute("UPDATE custody SET owner=?,updated=? WHERE owner=? AND state!='COMMITTED'", (agent, now, target))
             self.event(db, "takeover", agent, {"target": target, "reason": reason})
             return {"retired_agent": target, "claims": [dict(r) for r in db.execute("SELECT * FROM claims WHERE agent=? AND active=1", (agent,))]}
         if method in ("noticeboard_post", "inbox_send"):

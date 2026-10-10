@@ -28,7 +28,7 @@ def main():
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "installed-check", "version": "1"}}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "board_status", "arguments": {}}},
-            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "legacy_noticeboard_read", "arguments": {"limit": 1}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "inbox_read", "arguments": {}}},
         ]
         result = subprocess.run([config["command"], *args], input="".join(json.dumps(r) + "\n" for r in requests),
                                 capture_output=True, text=True, timeout=25, cwd=Path.home())
@@ -36,15 +36,15 @@ def main():
         replies = [json.loads(line) for line in result.stdout.splitlines()]
         assert len(replies) == 4, result.stderr
         assert all("result" in reply for reply in replies), replies
-        assert len(replies[1]["result"]["tools"]) == 10
+        assert len(replies[1]["result"]["tools"]) == 11
         status = json.loads(replies[2]["result"]["content"][0]["text"])
-        legacy = json.loads(replies[3]["result"]["content"][0]["text"])
+        inbox = json.loads(replies[3]["result"]["content"][0]["text"])
         assert not replies[2]["result"]["isError"]
         expected = Path(args[args.index("--workspace") + 1]).resolve()
         assert Path(status["workspace"]).resolve() == expected
         assert not replies[3]["result"]["isError"]
         ids.append(status["your_agent_id"])
-        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 10, "workspace": status["workspace"], "legacy_lines": legacy.get("total_lines", 0)}))
+        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 11, "workspace": status["workspace"]}))
     assert len(set(ids)) == len(ids)
     try:
         url = args[args.index("--url") + 1] if "--url" in args else "http://127.0.0.1:4317"

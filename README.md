@@ -4,7 +4,8 @@ A local coordination hub for multiple coding agents sharing one working director
 across different harnesses. Python 3.10+; no runtime dependencies.
 
 Each MCP connection gets an agent ID. Swarmboard provides atomic file/folder
-claims, a shared noticeboard, persistent inboxes and explicit takeover of an
+claims, named resource mutexes, durable commit custody, a shared noticeboard,
+persistent inboxes and explicit takeover of an
 unavailable agent's claims. One local daemon owns SQLite state; stdio MCP bridges
 connect agents to it. The MCP connection and kickoff shortcut are named `board`.
 
@@ -66,11 +67,34 @@ at the same path.
    `accepted=true`. On conflict contact the holder or choose other work.
 4. Check before each edit batch or scope change. Process inbox reminders and
    acknowledge messages after handling them.
-5. Post useful dependencies and handoffs, then release your claim IDs.
+5. Post useful dependencies and handoffs. File release requires `commit_hash`
+   or `held_reason`; HELD frees the lock but keeps custody and reminders.
+   Use `custody_resolve` to record a later commit. Expiry also keeps custody.
 
-For an existing swarm, `legacy_noticeboard_read` reads its `NOTICEBOARD.md` live.
-Keep following existing claims and conventions during rollout. An empty hub does
-not clear legacy claims; connecting does not import them or claim current work.
+Shared resources use `mutex_claim` with agreed IDs such as `db:core_test`,
+`port:3101`, `build:web/dist`, `git:index` or `misc:fixture`. Resource conflicts
+are refused by the hub, but agents cooperate before using actual resources.
+Hold `git:index` throughout staging, committing and index synchronization.
+Resource-only release needs a completion `reason`, not a Git commit. IDs are
+case-insensitive, exact matches and workspace-scoped; aliases and resources
+shared across separate workspaces are not automatically coordinated.
+
+Accepting overlapping file work also accepts its unfinished custody. Takeover
+transfers outstanding custody as well as live claims. Commit hashes are recorded
+completion evidence, not independent proof of tests, push, or commit contents.
+
+The SQLite noticeboard is the single board; there is no live Markdown adapter.
+For a one-time move from an old board:
+
+```sh
+python migrate_noticeboard.py --workspace /path/to/project --database /path/to/state/hub.sqlite --source /path/to/project/old-board.md --archive /path/to/private/archive --lines 30 --retire-source
+```
+
+The importer archives the full file, imports its last 30 lines as historical
+notices, verifies insertion and then retires the source. Repeating an identical
+snapshot does not duplicate notices. Historical labels are not authenticated
+agent IDs or live locks. Update repository instructions and reconnect existing
+sessions before continuing under the new board rules.
 
 The kickoff skill is `examples/board-skill/SKILL.md`. Install its folder as a
 personal `board` skill for your harness: `/board` in Claude Code or `$board` in
@@ -85,7 +109,7 @@ remain until expiry or takeover. Leases are not automatically renewed.
 ## Interfaces and verification
 
 Tools: `board_status`, `claim`, `release`, `takeover`, `noticeboard_read`,
-`noticeboard_post`, `legacy_noticeboard_read`, `inbox_send`, `inbox_read`,
+`mutex_claim`, `custody_resolve`, `noticeboard_post`, `inbox_send`, `inbox_read`,
 `inbox_ack`. Unread messages persist until acknowledged. Agent messages do not
 supply human-owner authorization.
 
@@ -99,7 +123,8 @@ python -m unittest discover -s tests -v
 
 Tests cover simultaneous/hierarchical claims, atomic multi-path acquisition,
 expiry, path escape, revocation, persistent inboxes, acknowledgement ownership,
-legacy-board pagination, workspace validation and real stdio bridges over HTTP.
+resource mutexes, durable custody, idempotent historical import, old-schema
+upgrades, workspace validation and real stdio bridges over HTTP.
 
 Optional checks:
 
@@ -124,5 +149,5 @@ Push delivery and sampling are not implemented. Activity measures hub calls,
 not model availability. Event history is ordinary SQLite data; notices have
 no Markdown mirror.
 
-Planned: named resource mutexes, unfinished-work reminders, owner-authorized
-bypass, usage/liveness retirement, edit hooks and optional push adapters.
+Planned: owner-authorized bypass, usage/liveness retirement, edit hooks and
+optional push adapters.

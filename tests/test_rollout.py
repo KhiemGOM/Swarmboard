@@ -22,26 +22,12 @@ class RolloutTests(unittest.TestCase):
     def call(self, method, **params):
         return self.hub.call(method, {**params, "agent_id": self.agent["agent_id"], "session_token": self.agent["session_token"]})
 
-    def test_legacy_board_pagination_and_changes(self):
-        (self.root / "NOTICEBOARD.md").write_text("first\nsecond\nthird\n", encoding="utf-8")
-        page = self.call("legacy_noticeboard_read", start_line=0, limit=2)
-        self.assertEqual(page["lines"], ["first", "second"])
-        self.assertEqual(page["next_start_line"], 2)
-        self.assertEqual(self.call("legacy_noticeboard_read", start_line=2)["lines"], ["third"])
-        (self.root / "NOTICEBOARD.md").write_text("new CLAIM\n", encoding="utf-8")
-        self.assertEqual(self.call("legacy_noticeboard_read")["lines"], ["new CLAIM"])
-
-    def test_missing_board_and_invalid_pagination(self):
-        self.assertFalse(self.call("legacy_noticeboard_read")["exists"])
-        for params in [{"start_line": -1}, {"limit": 0}, {"limit": 201}]:
-            with self.assertRaises(BoardError):
-                self.call("legacy_noticeboard_read", **params)
-
-    def test_status_exposes_transition_rules(self):
+    def test_status_exposes_custody_and_no_legacy_integration(self):
         status = self.call("board_status")
-        self.assertIn("coordination_rules", status)
-        self.assertIn("legacy_noticeboard", status)
-        self.assertEqual(status["legacy_noticeboard"]["path"], str(self.root / "NOTICEBOARD.md"))
+        self.assertIn("custody", status)
+        self.assertNotIn("legacy_noticeboard", status)
+        with self.assertRaises(BoardError):
+            self.call("legacy_noticeboard_read")
 
     def test_health_verifies_workspace_without_registering(self):
         server = serve(self.hub, 0)

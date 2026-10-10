@@ -40,13 +40,6 @@ def main():
         statuses.append(code)
         if code == "??" and path.startswith("db/migrations/"):
             migrations.append(path)
-    notice = workspace / "NOTICEBOARD.md"
-    notice_lines = notice.read_text(encoding="utf-8-sig").splitlines() if notice.exists() else []
-    recent = []
-    for line in notice_lines:
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) >= 3 and parts[0].startswith("2026-"):
-            recent.append({"label": parts[1], "status": parts[2]})
     hub = Hub(state / "hub.sqlite", workspace)
     server = serve(hub, 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -69,9 +62,7 @@ def main():
         return json.loads(result["content"][0]["text"])
     report = {"workspace": str(workspace), "mode": "isolated simulated agents, real directory paths",
               "dirty_entries_at_snapshot": len(statuses), "git_status_counts": dict(Counter(statuses)),
-              "untracked_migrations": migrations, "noticeboard_lines_at_snapshot": len(notice_lines),
-              "recent_notice_statuses": recent[-12:],
-              "noticeboard_attribution": "Historical labels only; not authenticated agent identities or authoritative live locks"}
+              "untracked_migrations": migrations}
     try:
         for bridge in bridges:
             rpc(bridge, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "workspace-probe", "version": "1"}})
@@ -89,16 +80,16 @@ def main():
         holder, successor = bridges[winner], bridges[1 - winner]
         holder_id = tool(holder, "board_status")["your_agent_id"]
         successor_id = tool(successor, "board_status")["your_agent_id"]
-        conflict = tool(successor, "claim", {"paths": ["web/src/edit"], "reason": "Parent-folder conflict probe"})
+        conflict = tool(successor, "claim", {"paths": [Path(path).parent.as_posix()], "reason": "Parent-folder conflict probe"})
         assert not conflict["accepted"]
-        message = tool(holder, "inbox_send", {"recipient_agent_id": successor_id, "body": "Simulated handoff only; live swarm remains on NOTICEBOARD.md"})
+        message = tool(holder, "inbox_send", {"recipient_agent_id": successor_id, "body": "Simulated handoff only; no source edits"})
         assert tool(successor, "noticeboard_read")["unread_inbox"] == 1
         assert tool(successor, "inbox_read")["unread_inbox"] == 1
         tool(successor, "takeover", {"target_agent_id": holder_id, "reason": "Continuing simulated agent work; simulated predecessor is dead"})
         rejected = rpc(holder, "tools/call", {"name": "board_status"})
         assert rejected["isError"]
         assert tool(successor, "inbox_ack", {"message_ids": [message["id"]]})["unread_inbox"] == 0
-        tool(successor, "release", {"claim_ids": results[winner]["claim_ids"]})
+        tool(successor, "release", {"claim_ids": results[winner]["claim_ids"], "held_reason": "Isolated simulated claim; no source changes"})
         assert tool(successor, "board_status")["claims"] == []
         report["checks"] = {"simultaneous_claim_one_winner": True, "parent_folder_conflict_refused": True,
                             "inbox_reminder_and_ack": True, "takeover_revoked_predecessor": True,

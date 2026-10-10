@@ -51,7 +51,7 @@ class HubTests(unittest.TestCase):
         with self.assertRaisesRegex(BoardError, "retired"):
             self.call(self.a, "claim", paths=["other"], reason="returned")
         self.assertEqual(self.call(self.b, "board_status")["claims"][0]["agent"], self.b["agent_id"])
-        self.call(self.b, "release", claim_ids=ids)
+        self.call(self.b, "release", claim_ids=ids, commit_hash="abcdef0")
 
     def test_messages_remind_until_acknowledged_and_survive_restart(self):
         message = self.call(self.a, "inbox_send", recipient_agent_id=self.b["agent_id"], body="Need port 3101")
@@ -106,20 +106,30 @@ class HubTests(unittest.TestCase):
         try:
             for process in processes:
                 initialized = rpc(process, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}})
-                self.assertEqual(initialized["serverInfo"]["name"], "agent-board")
-                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 10)
+                self.assertEqual(initialized["serverInfo"]["name"], "swarmboard")
+                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 11)
             first, second = processes
             a = tool(first, "board_status")["your_agent_id"]
             b = tool(second, "board_status")["your_agent_id"]
             self.assertNotEqual(a, b)
             self.assertTrue(tool(first, "claim", {"paths": ["src"], "reason": "probe"})["accepted"])
             self.assertFalse(tool(second, "claim", {"paths": ["src/a.py"], "reason": "probe"})["accepted"])
+            files = tool(first, "board_status")["claims"]
+            missing_evidence = rpc(first, "tools/call", {"name": "release", "arguments": {"claim_ids": [files[0]["id"]]}})
+            self.assertTrue(missing_evidence["isError"])
+            resource = tool(first, "mutex_claim", {"resources": ["db:shared_test"], "reason": "tests"})
+            self.assertFalse(tool(second, "mutex_claim", {"resources": ["db:shared_test"], "reason": "other tests"})["accepted"])
+            tool(first, "release", {"claim_ids": resource["claim_ids"], "reason": "tests finished"})
             message = tool(first, "inbox_send", {"recipient_agent_id": b, "body": "handoff"})
             self.assertIn("inbox_reminder", tool(second, "board_status"))
             tool(second, "takeover", {"target_agent_id": a, "reason": "First probe is dead"})
             retired = rpc(first, "tools/call", {"name": "board_status"})
             self.assertTrue(retired["isError"])
             self.assertEqual(tool(second, "inbox_ack", {"message_ids": [message["id"]]})["unread_inbox"], 0)
+            tool(second, "release", {"claim_ids": [files[0]["id"]], "held_reason": "Awaiting validation"})
+            self.assertIn("custody_reminder", tool(second, "board_status"))
+            tool(second, "custody_resolve", {"paths": ["src"], "commit_hash": "abcdef0"})
+            self.assertNotIn("custody_reminder", tool(second, "board_status"))
         finally:
             for process in processes:
                 process.stdin.close()
