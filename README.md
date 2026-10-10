@@ -198,12 +198,44 @@ authorized exchange without repeated permission requests. Hooks preview unread
 messages during supported tool activity (including board calls) and at Stop,
 without acknowledging them or guaranteeing idle-session wakeup.
 
-Install `examples/mutex-skill/` as a personal `mutex` skill for each harness.
-Use `/mutex` in Claude Code or `$mutex` in Codex to review the agent's own locks.
+Install `examples/board-skill/` as the personal `board` skill for each harness.
+Use `/board mutex` in Claude Code or `$board mutex` in Codex to review the agent's own locks.
 It releases idle resource locks with a reason and idle file locks with a commit
 hash or HELD handoff. It preserves active process locks and unfinished custody;
 it never takes another agent's locks based on age. Stop hooks also prompt this
 review when locks remain. This is an agent-guided review, not automatic eviction.
+
+### Retire an agent, even with no model quota
+
+`/board retire` (Codex: `$board retire`) retires the current agent. Add an exact
+agent ID to retire another agent. This is distinct from takeover: all mutexes are
+released and unfinished jobs return to OPEN for other workers to claim, rather
+than becoming the caller's work. Unfinished file custody becomes HELD and follows
+the next accepted file claim. Completed jobs/commits, saved progress and inboxes
+remain intact. The retired ID immediately loses hub access and must stop work.
+Repeated retirement is harmless; unknown IDs are refused. Processes are not killed.
+
+Without a model or running daemon, use the terminal from this checkout:
+
+```powershell
+./board.ps1 status
+./board.ps1 retire AGENT_ID -Reason 'Quota exhausted; owner releasing this agent'
+./board.ps1 mutex
+./board.ps1 jobs
+```
+
+Cross-platform equivalent: `python boardctl.py retire AGENT_ID --reason "Quota exhausted"`.
+Terminal commands cannot infer a chat's current agent; supply its exact ID from
+status. They execute locally against SQLite, without API calls, model quota,
+registration or another agent's session credentials. All human commands live
+under board; there is no standalone `/mutex` skill.
+
+The installer saves private defaults in `.board/operator.json` for the configured
+workspace/database/port. Pass `-Workspace`, `-Database`, `-Port` (Python:
+`--workspace`, `--database`, `--port`) to override them. Explicit workspace changes
+do not reuse another workspace's saved database. A missing/mismatched database
+is refused before retirement; no empty board is silently created. The local
+operator is trusted, just like other local processes with access to this database.
 
 Job tools: `job_post`, `job_list`, `job_claim`, `job_update`, `job_yield`,
 `job_finish`. CLI also offers `heartbeat` and `disconnect`.

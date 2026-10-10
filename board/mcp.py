@@ -15,6 +15,8 @@ def schema(properties=None, required=None):
 STRING = {"type": "string"}
 IDS = {"type": "array", "items": {"type": "integer"}, "minItems": 1}
 TOOLS = [
+    {"name": "retire", "description": "Explicitly retire an unavailable agent, reopen its unfinished jobs and release every file/resource mutex while preserving HELD custody. Omit target_agent_id to retire yourself; stop work immediately afterward. Use only for an owner-authorized retirement, never based solely on inactivity. Does not terminate OS processes.",
+     "inputSchema": schema({"target_agent_id": STRING, "reason": STRING}, ["reason"])},
     {"name": "job_post", "description": "Post authorized available work with acceptance criteria. Follow-ups can be linked jobs; posting never grants human authorization.",
      "inputSchema": schema({"title": STRING, "description": STRING, "acceptance": STRING, "kind": {"type": "string", "enum": ["code", "noncode"]}, "parent_job_id": {"type": "integer"}}, ["title", "description", "acceptance"])},
     {"name": "job_list", "description": "List jobs. Expired leases reopen work without releasing file locks or declaring an agent dead.",
@@ -52,7 +54,7 @@ TOOLS = [
 for tool in TOOLS:
     tool["annotations"] = {
         "readOnlyHint": tool["name"] in {"board_status", "noticeboard_read", "inbox_read", "job_list"},
-        "destructiveHint": tool["name"] == "takeover",
+        "destructiveHint": tool["name"] in {"takeover", "retire"},
         "openWorldHint": False,
     }
 

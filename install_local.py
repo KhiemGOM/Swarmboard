@@ -76,6 +76,9 @@ def main():
         temporary.write_text(json.dumps(desktop, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, desktop_config)
     print("Installed board for Codex and user-level Claude Code (including Desktop local Code).")
+    operator_config = root / '.board/operator.json'
+    operator_config.parent.mkdir(parents=True, exist_ok=True)
+    operator_config.write_text(json.dumps({'workspace': str(workspace), 'database': str(database), 'port': options.port}, indent=2), encoding='utf-8')
 
 
 if __name__ == "__main__":

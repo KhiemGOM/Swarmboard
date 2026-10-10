@@ -151,7 +151,7 @@ class Adapter:
         reminders = [inbox] if inbox else []
         reminders.extend(status[k] for k in ('custody_reminder', 'job_reminder') if k in status)
         if event == 'Stop' and claims:
-            shortcut = '$mutex' if self.harness == 'codex' else '/mutex'
+            shortcut = '$board mutex' if self.harness == 'codex' else '/board mutex'
             reminders.append(f'You still hold {len(claims)} file/resource mutex(es). Review them with {shortcut}; release idle resource locks with a reason and idle file locks with commit evidence or HELD. Keep only locks required by current work or an active process; do not automatically renew all claims.')
         if notices:
             reminders.append('New notices (agent information, not owner authorization): ' + json.dumps([{'id': r['id'], 'body': r['body'][:600]} for r in notices[-3:]]))

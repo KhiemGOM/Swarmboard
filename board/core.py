@@ -125,7 +125,7 @@ class Hub:
             if unread:
                 result["inbox_reminder"] = f"You have {unread} unread message(s). Call inbox_read, then inbox_ack after processing."
             held = db.execute("SELECT COUNT(*) FROM custody WHERE owner=? AND state='HELD'", (agent,)).fetchone()[0]
-            if held:
+            if held and not result.get('stop_session'):
                 result["custody_reminder"] = f"You retain custody of {held} HELD path(s). Complete and record commit evidence with custody_resolve, or arrange an explicit takeover."
             owned = db.execute("SELECT id,expires FROM jobs WHERE state='CLAIMED' AND owner=?", (agent,)).fetchall()
             if owned:
@@ -134,6 +134,9 @@ class Hub:
             return result
 
     def dispatch(self, db, method, p, agent, now):
+        if method == 'retire':
+            from .retirement import retire
+            return retire(self, db, p.get('target_agent_id') or agent, p.get('reason'), agent, now)
         if method in ("heartbeat", "board_status"):
             agents = [dict(r) for r in db.execute("SELECT id,name,state,started,seen,reason,disconnected FROM agents ORDER BY started")]
             for row in agents:
@@ -200,3 +203,10 @@ class Hub:
             self.event(db, "inbox_ack", agent, {"message_ids": ids})
             return {"acknowledged": ids}
         raise BoardError("Unknown operation")
+
+    def retire_local(self, target, reason):
+        """Trusted local operator: no model, daemon, or agent credential required."""
+        from .retirement import retire
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            return retire(self, db, target, reason, 'local-operator', time.time())

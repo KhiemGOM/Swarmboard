@@ -107,7 +107,7 @@ class HubTests(unittest.TestCase):
             for process in processes:
                 initialized = rpc(process, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}})
                 self.assertEqual(initialized["serverInfo"]["name"], "swarmboard")
-                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 17)
+                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 18)
             first, second = processes
             a = tool(first, "board_status")["your_agent_id"]
             b = tool(second, "board_status")["your_agent_id"]

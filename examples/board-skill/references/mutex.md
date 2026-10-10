@@ -1,8 +1,3 @@
----
-name: mutex
-description: Review your own Swarmboard file and resource mutexes and release idle locks. Use when asked to check mutexes, stop hogging locks, free unused claims, or review locks before a handoff or scope change.
----
-
 # Review your mutexes
 
 Use the existing board MCP identity. Read board_status, noticeboard_read and

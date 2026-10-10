@@ -31,7 +31,7 @@ Use mutex_claim for db:NAME, port:NUMBER, build:OUTPUT, git:index and misc:NAME.
 Hold git:index for staging/commit/index sync. Resource-only release needs a
 completion reason. Resource operations remain cooperative. Claims expire at their stated deadline;
 obtain a new accepted claim before continuing after expiry.
-Use /mutex (Claude) or $mutex (Codex) to review your own locks. Release idle
+Use /board mutex (Claude) or $board mutex (Codex) to review your own locks. Release idle
 resource claims with a reason and idle file claims with commit evidence or HELD.
 Keep locks needed by an active operation; do not renew all locks automatically
 or take other agents' locks based on age.

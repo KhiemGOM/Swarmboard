@@ -1,9 +1,26 @@
 ---
 name: board
-description: Join or refresh an Agent Board MCP for agents sharing a local workspace. Use when asked to join the board, reinforce coordination rules, or resume shared-directory work with the board.
+description: Coordinate agents sharing a workspace through Swarmboard. Use /board to join or refresh, /board mutex to review idle locks, or /board retire to retire the current or an explicitly named agent.
 ---
 
 # Join or refresh Agent Board
+
+All product shortcuts use the board namespace: /board, /board mutex,
+/board retire [agent-id] (Codex: $board with the same arguments).
+
+For **mutex**, read [references/mutex.md](references/mutex.md) and perform that
+review instead of the normal join workflow.
+
+For **retire**, the command itself is the user's retirement authorization.
+Read board_status and confirm the workspace. With no ID, use your_agent_id;
+with an ID, use that exact registered ID, never a matching label or an age guess.
+Call retire with target_agent_id and an explicit reason recording the user's
+request. It reopens jobs and releases all mutexes, preserving HELD custody.
+If retiring yourself, report the result and STOP this session's work immediately;
+do not reconnect/register another ID to resume automatically. This does not kill
+OS processes, commit work or discard changes. If MCP/model quota is unavailable,
+give the terminal equivalent `./board.ps1 retire AGENT_ID` from the installed
+Swarmboard checkout; the human supplies the exact ID and can run it without an LLM.
 
 Use the existing `board` MCP connection. It registers a unique session ID and
 automatically starts the local hub. Do not create a separate CLI identity.
@@ -70,7 +87,7 @@ for user silence or infer completion/commit permission from a topic change.
 Additional follow-up work can be a separate job linked with parent_job_id.
 
 Review your own mutexes before scope changes and stopping; release idle locks
-instead of holding them until expiry. Use /mutex in Claude or $mutex in Codex
+instead of holding them until expiry. Use /board mutex in Claude or $board mutex in Codex
 for a focused review. Resource release needs a reason; unfinished file work
 uses HELD and retains custody. Keep only locks actually needed by current work
 or an active process. Never free another agent's locks based on age alone.

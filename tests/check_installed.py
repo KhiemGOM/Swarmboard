@@ -36,7 +36,7 @@ def main():
         replies = [json.loads(line) for line in result.stdout.splitlines()]
         assert len(replies) == 4, result.stderr
         assert all("result" in reply for reply in replies), replies
-        assert len(replies[1]["result"]["tools"]) == 17
+        assert len(replies[1]["result"]["tools"]) == 18
         status = json.loads(replies[2]["result"]["content"][0]["text"])
         inbox = json.loads(replies[3]["result"]["content"][0]["text"])
         assert not replies[2]["result"]["isError"]
@@ -44,7 +44,7 @@ def main():
         assert Path(status["workspace"]).resolve() == expected
         assert not replies[3]["result"]["isError"]
         ids.append(status["your_agent_id"])
-        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 17, "workspace": status["workspace"]}))
+        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 18, "workspace": status["workspace"]}))
     assert len(set(ids)) == len(ids)
     try:
         url = args[args.index("--url") + 1] if "--url" in args else "http://127.0.0.1:4317"

@@ -93,7 +93,7 @@ class HookTests(unittest.TestCase):
         claim = self.call('mutex_claim', resources=['port:3519'], reason='Preview still running')
         before = self.call('board_status')['claims']
         warning = self.event('Stop')['systemMessage']
-        self.assertIn('/mutex', warning)
+        self.assertIn('/board mutex', warning)
         self.assertEqual(self.call('board_status')['claims'], before)
         self.call('release', claim_ids=claim['claim_ids'], reason='Preview stopped')
         self.assertEqual(self.event('Stop'), {})
