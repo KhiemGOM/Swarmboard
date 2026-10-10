@@ -25,7 +25,16 @@ For **request-relax FILE**, call board_coordination action=request_relax with
 the exact file and why shared preparation is useful. This sends an inbox request
 without revoking ownership. Prefer this for a contended common file when the
 holder can safely stop direct edits. Avoid repeated requests or assuming age
-proves hogging. Join and read the queue base only after conversion succeeds.
+proves hogging. Successful relaxation automatically sends every requester a
+system inbox invitation naming the file and queue. No board_wait subscription
+is needed to receive that invitation or a holder's inbox reply. Explicitly join
+and read the queue base only after conversion succeeds; you were not auto-joined.
+An acknowledgment is not an answer, approval or relaxation. Do not subscribe to
+message_ack as a reply wait: it only tracks a message you personally sent, while
+request_relax sends a system message. Do independent authorized work meanwhile.
+Deferred-base joining behind an exclusive writer is not implemented. A slow or
+refused request is not a violation: do not report a stall or invent a timeout
+that triggers takeover, relaxation or joining. See [references/relax.md](references/relax.md).
 
 For **report FILE**, call board_coordination action=report with the exact file,
 reason, before_hash and after_hash (different 64-character SHA-256 hashes of raw
