@@ -48,4 +48,3 @@ class MigrationTests(unittest.TestCase):
             source.write_text("history")
             with self.assertRaises(BoardError):
                 migrate(Hub(root / "hub.sqlite", root / "workspace"), source, root / "archive")
-

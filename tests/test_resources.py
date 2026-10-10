@@ -80,4 +80,3 @@ class ResourceTests(unittest.TestCase):
         first = self.call(self.a, "mutex_claim", resources=["git:index"], reason="first")
         second = self.call(self.a, "mutex_claim", resources=["git:index"], reason="renew")
         self.assertEqual(first["claim_ids"], second["claim_ids"])
-

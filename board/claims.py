@@ -101,4 +101,3 @@ def dispatch(hub, db, method, p, agent, now):
             db.execute("UPDATE custody SET state='COMMITTED',commit_hash=?,reason='Commit evidence recorded',updated=? WHERE path=?", (sha, now, path))
         hub.event(db, "custody_resolved", agent, {"paths": paths, "commit_hash": sha})
         return {"resolved": paths, "commit_hash": sha}
-
