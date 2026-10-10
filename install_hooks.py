@@ -1,5 +1,6 @@
 """Merge Swarmboard command hooks into both harnesses, preserving other settings."""
 import argparse
+import base64
 import json
 import shlex
 import shutil
@@ -13,12 +14,24 @@ def shell_command(argv, windows=False):
     if windows:
         # PowerShell requires invocation syntax for a quoted executable. Single
         # quotes also keep $, backticks and other shell syntax literal in paths.
-        return '& ' + ' '.join("'" + str(arg).replace("'", "''") + "'" for arg in argv) + '; exit $LASTEXITCODE'
+        script = '& ' + ' '.join("'" + str(arg).replace("'", "''") + "'" for arg in argv) + '; exit $LASTEXITCODE'
+        # Codex versions/session launchers can use either CMD or PowerShell.
+        # A quote-free outer command works with both, including CMD raw_arg
+        # wrapping. PowerShell alone interprets the literal argument script.
+        encoded = base64.b64encode(script.encode('utf-16-le')).decode('ascii')
+        return 'powershell.exe -NoProfile -NonInteractive -EncodedCommand ' + encoded
     return shlex.join(argv)
 
 
 def ours(handler):
-    return 'swarmboard_hook.py' in handler.get('command', '') or any('swarmboard_hook.py' in str(arg) for arg in handler.get('args', []))
+    command = handler.get('command', '')
+    prefix = 'powershell.exe -NoProfile -NonInteractive -EncodedCommand '
+    if command.startswith(prefix):
+        try:
+            command = base64.b64decode(command[len(prefix):], validate=True).decode('utf-16-le')
+        except (ValueError, UnicodeError):
+            return False
+    return 'swarmboard_hook.py' in command or any('swarmboard_hook.py' in str(arg) for arg in handler.get('args', []))
 
 
 def install(path, command, arguments=None, watch=False):

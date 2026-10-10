@@ -14,14 +14,18 @@ from install_hooks import install, shell_command
 class HookTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == 'win32', 'Windows PowerShell launcher')
     def test_windows_shell_preserves_arguments_stdin_and_exit_status(self):
-        shells = [path for name in ('powershell.exe', 'pwsh') if (path := shutil.which(name))]
+        shells = [[path, '-NoProfile', '-NonInteractive', '-Command'] for name in ('powershell.exe', 'pwsh') if (path := shutil.which(name))]
+        if shutil.which('cmd.exe'):
+            shells.append([shutil.which('cmd.exe'), '/e:ON', '/v:OFF', '/d', '/c'])
         self.assertTrue(shells)
         argument = "C:/space dir/O'Brien/$literal`;file.json"
         argv = [sys.executable, '-c', 'import json,sys; print(json.dumps([sys.argv[1],sys.stdin.read()])); sys.exit(7)', argument]
         for shell in shells:
             with self.subTest(shell=shell):
-                result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-Command', shell_command(argv, windows=True)], input='{"hook_event_name":"Stop"}', capture_output=True, text=True, timeout=15)
-                self.assertEqual(result.returncode, 7, result.stderr)
+                result = subprocess.run([*shell, shell_command(argv, windows=True)], input='{"hook_event_name":"Stop"}', capture_output=True, text=True, timeout=15)
+                # An outer PowerShell -Command maps a native nonzero status to
+                # 1; CMD preserves it. Both must preserve failure and payload.
+                self.assertEqual(result.returncode, 7 if '/c' in shell else 1, result.stderr)
                 self.assertEqual(json.loads(result.stdout), [argument, '{"hook_event_name":"Stop"}'])
 
     def setUp(self):
@@ -170,4 +174,8 @@ class HookTests(unittest.TestCase):
         self.assertEqual(len(result['hooks']['UserPromptSubmit']), 1)
         install(path, 'python', ['/repo/swarmboard_hook.py', '--harness', 'claude'])
         install(path, 'python', ['/repo/swarmboard_hook.py', '--harness', 'claude'])
+        self.assertEqual(len(json.loads(path.read_text())['hooks']['PreToolUse']), 2)
+        encoded = shell_command(['python', '/repo/swarmboard_hook.py', '--harness', 'codex'], windows=True)
+        install(path, encoded)
+        install(path, encoded)
         self.assertEqual(len(json.loads(path.read_text())['hooks']['PreToolUse']), 2)

@@ -5,6 +5,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from install_hooks import ours
+
 
 def main():
     home = Path.home()
@@ -25,13 +28,13 @@ def main():
             assert 'result' in reply, reply
             return reply['result']
         def event(name, watch=False, **fields):
-            handler = next(h for entry in hooks[name] for h in entry['hooks'] if bool(h.get('asyncRewake')) == watch and ('swarmboard_hook.py' in h['command'] or any('swarmboard_hook.py' in str(arg) for arg in h.get('args', []))))
+            handler = next(h for entry in hooks[name] for h in entry['hooks'] if bool(h.get('asyncRewake')) == watch and ours(h))
             if 'args' in handler:
                 command = [handler['command'], *handler['args']]
                 if watch:
                     command += ['--watch-seconds', '.2']
             elif sys.platform == 'win32':
-                command = [shutil.which('pwsh') or 'powershell.exe', '-NoProfile', '-NonInteractive', '-Command', handler.get('commandWindows', handler['command'])]
+                command = [shutil.which('cmd.exe') or 'cmd.exe', '/e:ON', '/v:OFF', '/d', '/c', handler.get('commandWindows', handler['command'])]
             else:
                 command = ['/bin/sh', '-c', handler['command']]
             result = subprocess.run(command,
@@ -76,7 +79,7 @@ def main():
             event('Stop')
             event('SessionEnd')
             print(json.dumps({'harness': harness, 'saved_hook_payloads': 'passed', 'unclaimed_edit': 'denied', 'unclaimed_git_index': 'denied', 'files_edited': False,
-                              'hook_launcher': 'direct argv' if harness == 'claude' else 'shell', 'inbox_tool_and_prompt_delivery': 'passed', 'delivery_does_not_ack': 'passed',
+                              'hook_launcher': 'direct argv' if harness == 'claude' else 'CMD on Windows / shell on Unix', 'inbox_tool_and_prompt_delivery': 'passed', 'delivery_does_not_ack': 'passed',
                               'claude_wake_signal': 'passed' if harness == 'claude' else 'not installed',
                               'native_harness_dispatch': 'not exercised; reload/review changed hook definitions'}))
         finally:
