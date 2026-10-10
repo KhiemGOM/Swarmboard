@@ -21,7 +21,7 @@ def ours(handler):
     return 'swarmboard_hook.py' in handler.get('command', '') or any('swarmboard_hook.py' in str(arg) for arg in handler.get('args', []))
 
 
-def install(path, command, arguments=None):
+def install(path, command, arguments=None, watch=False):
     saved = json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
     hooks = saved.setdefault('hooks', {})
     if not isinstance(hooks, dict):
@@ -37,14 +37,21 @@ def install(path, command, arguments=None):
             if copy['hooks']:
                 kept.append(copy)
         hooks[event] = kept
-    for event, matcher in [('SessionStart', None), ('PreToolUse', 'Edit|Write|MultiEdit|NotebookEdit|apply_patch|Bash|exec_command'),
-                           ('PostToolUse', 'mcp__board__.*'), ('Stop', None), ('SessionEnd', None)]:
+    for event, matcher in [('SessionStart', None), ('UserPromptSubmit', None),
+                           ('PreToolUse', 'Edit|Write|MultiEdit|NotebookEdit|apply_patch|Bash|exec_command'),
+                           ('PostToolUse', None), ('Stop', None), ('SessionEnd', None)]:
         entry = {'hooks': [{'type': 'command', 'command': command, 'timeout': 3 if event == 'SessionEnd' else 10}]}
         if arguments is not None:
             entry['hooks'][0]['args'] = arguments
         if matcher:
             entry['matcher'] = matcher
         hooks.setdefault(event, []).append(entry)
+    if watch:
+        if arguments is None:
+            raise ValueError('Inbox watcher requires direct executable/args form')
+        hooks['Stop'].append({'hooks': [{'type': 'command', 'command': command,
+                                       'args': [*arguments, '--watch-inbox'],
+                                       'asyncRewake': True, 'timeout': 3605}]})
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         shutil.copy2(path, path.with_name(path.name + '.swarmboard-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.bak'))
@@ -63,7 +70,7 @@ def main():
         argv = [sys.executable, str(Path(__file__).resolve().with_name('swarmboard_hook.py')), '--harness', harness,
                 '--workspace', str(Path(args.workspace).resolve()), '--database', str(Path(args.database).resolve()), '--url', args.url]
         command = shell_command(argv, windows=sys.platform == 'win32')
-        install(config, argv[0] if harness == 'claude' else command, argv[1:] if harness == 'claude' else None)
+        install(config, argv[0] if harness == 'claude' else command, argv[1:] if harness == 'claude' else None, watch=harness == 'claude')
         print(f'Installed {harness} Swarmboard hooks: {config}')
 
 

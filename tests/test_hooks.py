@@ -88,7 +88,8 @@ class HookTests(unittest.TestCase):
         outside = self.root.parent
         self.assertEqual(self.adapter.handle({'cwd': str(outside), 'hook_event_name': 'PreToolUse'}), {})
         self.event('PostToolUse', tool_name='mcp__other__tool', tool_response={'your_agent_id': self.agent['agent_id']})
-        self.assertFalse((self.root / 'hook-sessions').exists())
+        states = list((self.root / 'hook-sessions').glob('*.json'))
+        self.assertTrue(all('agent_id' not in json.loads(path.read_text()) for path in states))
 
     def test_hooks_request_focused_status(self):
         requests = []
@@ -101,6 +102,29 @@ class HookTests(unittest.TestCase):
         self.event('Stop')
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(p['target_agent_id'] == 'self' and p['include_rules'] is False for p in requests))
+
+    def test_inbox_injected_after_ordinary_tools_and_on_next_prompt_without_ack(self):
+        self.bind()
+        sender = self.hub.call('register', {'name': 'Waiting peer'})
+        message = self.hub.call('inbox_send', {**sender, 'recipient_agent_id': self.agent['agent_id'], 'body': 'Please check this reply now'})
+        for event, fields in [('PostToolUse', {'tool_name': 'Read', 'tool_response': 'file text'}),
+                              ('PostToolUse', {'tool_name': 'mcp__other__read', 'tool_response': {}}),
+                              ('UserPromptSubmit', {'prompt': 'Continue'}), ('SessionStart', {})]:
+            with self.subTest(event=event, fields=fields):
+                output = self.event(event, **fields)['hookSpecificOutput']
+                self.assertEqual(output['hookEventName'], event)
+                self.assertIn('Please check this reply now', output['additionalContext'])
+                self.assertEqual(self.call('inbox_read')['unread_inbox'], 1)
+        self.call('inbox_ack', message_ids=[message['id']])
+        self.assertEqual(self.event('UserPromptSubmit', prompt='Continue'), {})
+        self.assertEqual(self.event('PostToolUse', tool_name='Read'), {})
+
+    def test_unlinked_session_reports_delivery_gap_without_guessing_identity(self):
+        first = self.event('PostToolUse', tool_name='Read')
+        self.assertIn('not linked', first['hookSpecificOutput']['additionalContext'])
+        self.assertEqual(self.event('PostToolUse', tool_name='Read'), {})
+        self.assertIn('native board_status', self.event('UserPromptSubmit')['hookSpecificOutput']['additionalContext'])
+        self.assertIn('linked', self.bind()['hookSpecificOutput']['additionalContext'])
 
     def test_inbox_surfaces_on_board_calls_and_blocked_edits_until_ack(self):
         sender = self.hub.call('register', {'name': 'Waiting peer'})
@@ -142,6 +166,8 @@ class HookTests(unittest.TestCase):
         self.assertEqual(len(result['hooks']['PreToolUse']), 2)
         self.assertEqual(result['hooks']['PreToolUse'][0]['hooks'][0]['command'], 'other_hook')
         self.assertEqual(len(result['hooks']['SessionStart']), 1)
+        self.assertNotIn('matcher', result['hooks']['PostToolUse'][0])
+        self.assertEqual(len(result['hooks']['UserPromptSubmit']), 1)
         install(path, 'python', ['/repo/swarmboard_hook.py', '--harness', 'claude'])
         install(path, 'python', ['/repo/swarmboard_hook.py', '--harness', 'claude'])
         self.assertEqual(len(json.loads(path.read_text())['hooks']['PreToolUse']), 2)

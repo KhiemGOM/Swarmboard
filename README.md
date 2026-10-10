@@ -197,7 +197,25 @@ quoting (including paths with spaces). Claude uses its direct executable/args
 form. These are different launch formats; a successful direct Python run alone
 does not verify a Codex shell hook.
 
-`SessionStart` reinforces the routine. `PreToolUse` checks supported file edits
+`SessionStart` reinforces the routine. `UserPromptSubmit` and every supported
+`PostToolUse` inject unread inbox previews into model context once the session
+has linked through a native board MCP call. Unlinked sessions receive an explicit
+reminder instead of silently skipping delivery. Every hub response also includes
+up to three unread message previews (1000 characters each) as a fallback, even
+without working native hooks. Preview delivery never acknowledges a message.
+
+Claude Code also installs a `Stop` background hook with `asyncRewake=true`. It
+waits up to one hour for new unread inbox messages, then exits with code 2 and
+provides the message preview as Claude's wake reminder. One watcher is allowed
+per native session; each message wakes it once. Notification markers are separate
+from acknowledgement. It stops when the bound identity retires, disconnects, or
+changes. The next Stop arms another watcher. After an hour of uninterrupted idle
+time, tool/prompt checks remain the fallback until a new Stop rearms it. This
+requires a Claude Code version supporting `asyncRewake` and a live interactive
+session; a closed process cannot be woken. Codex uses tool/prompt checks and MCP
+previews; this integration does not install an idle wake mechanism for Codex.
+
+`PreToolUse` checks supported file edits
 (Claude Edit/Write/MultiEdit/NotebookEdit and Codex apply_patch), including patch
 move destinations. Missing or expired claims are denied. Recognized Git index
 operations require `git:index`. Status/notices are refreshed before checks;

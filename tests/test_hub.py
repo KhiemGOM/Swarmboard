@@ -34,6 +34,15 @@ class HubTests(unittest.TestCase):
             results = list(pool.map(compete, [self.a, self.b]))
         self.assertEqual(sorted(results), [False, True])
 
+    def test_any_hub_response_previews_only_callers_unread_inbox_without_ack(self):
+        first = self.call(self.b, 'inbox_send', recipient_agent_id=self.a['agent_id'], body='Waiting for your reply')
+        self.call(self.a, 'inbox_send', recipient_agent_id=self.b['agent_id'], body='Private to B')
+        result = self.call(self.a, 'noticeboard_read')
+        self.assertEqual(result['inbox_preview'], [{'id': first['id'], 'sender': self.b['agent_id'], 'body': 'Waiting for your reply'}])
+        self.assertEqual(self.call(self.a, 'inbox_read')['unread_inbox'], 1)
+        self.call(self.a, 'inbox_ack', message_ids=[first['id']])
+        self.assertNotIn('inbox_preview', self.call(self.a, 'board_status'))
+
     def test_parent_child_conflict_but_siblings_allowed(self):
         self.call(self.a, "claim", paths=["src/editor"], reason="editing")
         self.assertFalse(self.call(self.b, "claim", paths=["src"], reason="parent")["accepted"])

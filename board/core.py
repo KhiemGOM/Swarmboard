@@ -124,6 +124,10 @@ class Hub:
             result["unread_inbox"] = unread
             if unread:
                 result["inbox_reminder"] = f"You have {unread} unread message(s). Call inbox_read, then inbox_ack after processing."
+                if method != 'inbox_read':
+                    result['inbox_preview'] = [
+                        {'id': row['id'], 'sender': row['sender'], 'body': row['body'][:1000]}
+                        for row in db.execute('SELECT id,sender,body FROM messages WHERE recipient=? AND acknowledged IS NULL ORDER BY id LIMIT 3', (agent,))]
             held = db.execute("SELECT COUNT(*) FROM custody WHERE owner=? AND state='HELD'", (agent,)).fetchone()[0]
             if held and not result.get('stop_session'):
                 result["custody_reminder"] = f"You retain custody of {held} HELD path(s). Complete and record commit evidence with custody_resolve, or arrange an explicit takeover."
