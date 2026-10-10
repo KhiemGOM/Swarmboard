@@ -189,6 +189,22 @@ Tools: `board_status`, `claim`, `release`, `takeover`, `noticeboard_read`,
 `inbox_ack`. Unread messages persist until acknowledged. Agent messages do not
 supply human-owner authorization.
 
+The noticeboard holds durable general workspace information. Use inboxes for
+direct requests/replies, blockers and time-sensitive availability or handoffs
+when another agent is waiting. If an ASAP answer is expected, send the authorized
+reply there promptly; a notice does not deliver it. If peer-contact authorization
+is unclear, ask whether the user wants to alert that agent once; continue an
+authorized exchange without repeated permission requests. Hooks preview unread
+messages during supported tool activity (including board calls) and at Stop,
+without acknowledging them or guaranteeing idle-session wakeup.
+
+Install `examples/mutex-skill/` as a personal `mutex` skill for each harness.
+Use `/mutex` in Claude Code or `$mutex` in Codex to review the agent's own locks.
+It releases idle resource locks with a reason and idle file locks with a commit
+hash or HELD handoff. It preserves active process locks and unfinished custody;
+it never takes another agent's locks based on age. Stop hooks also prompt this
+review when locks remain. This is an agent-guided review, not automatic eviction.
+
 Job tools: `job_post`, `job_list`, `job_claim`, `job_update`, `job_yield`,
 `job_finish`. CLI also offers `heartbeat` and `disconnect`.
 

@@ -75,6 +75,29 @@ class HookTests(unittest.TestCase):
         self.event('PostToolUse', tool_name='mcp__other__tool', tool_response={'your_agent_id': self.agent['agent_id']})
         self.assertFalse((self.root / 'hook-sessions').exists())
 
+    def test_inbox_surfaces_on_board_calls_and_blocked_edits_until_ack(self):
+        sender = self.hub.call('register', {'name': 'Waiting peer'})
+        message = self.hub.call('inbox_send', {**sender, 'recipient_agent_id': self.agent['agent_id'], 'body': 'Can you release the test DB? I am waiting.'})
+        notice = self.bind()['hookSpecificOutput']['additionalContext']
+        self.assertIn('I am waiting', notice)
+        self.assertIn(sender['agent_id'], notice)
+        self.assertEqual(self.call('inbox_read')['unread_inbox'], 1)
+        rejected = self.event('PreToolUse', tool_name='Write', tool_input={'file_path': 'unclaimed.py'})
+        self.assertEqual(rejected['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertIn('I am waiting', rejected['hookSpecificOutput']['permissionDecisionReason'])
+        self.call('inbox_ack', message_ids=[message['id']])
+        self.assertEqual(self.bind(), {})
+
+    def test_stop_reviews_active_mutexes_without_releasing_or_renewing(self):
+        self.bind()
+        claim = self.call('mutex_claim', resources=['port:3519'], reason='Preview still running')
+        before = self.call('board_status')['claims']
+        warning = self.event('Stop')['systemMessage']
+        self.assertIn('/mutex', warning)
+        self.assertEqual(self.call('board_status')['claims'], before)
+        self.call('release', claim_ids=claim['claim_ids'], reason='Preview stopped')
+        self.assertEqual(self.event('Stop'), {})
+
     def test_retired_identity_is_rejected_and_unavailable_hub_raises(self):
         self.bind()
         other = self.hub.call('register', {'name': 'Other'})
