@@ -51,9 +51,10 @@ class Hub:
                     lease_token TEXT, expires REAL, progress TEXT, recovery_reason TEXT,
                     summary TEXT, commit_hash TEXT, checks TEXT, created REAL, updated REAL);
             """)
-            from . import patch_queue, waits
+            from . import patch_queue, waits, coordination
             patch_queue.initialize(db)
             waits.initialize(db)
+            coordination.initialize(db)
             if "disconnected" not in {row[1] for row in db.execute("PRAGMA table_info(agents)")}:
                 db.execute("ALTER TABLE agents ADD COLUMN disconnected REAL")
             columns = {row[1] for row in db.execute('PRAGMA table_info(agents)')}
@@ -97,6 +98,8 @@ class Hub:
                    (kind, agent, json.dumps(payload), time.time()))
 
     def call(self, method, params):
+        from .coordination import scan
+        scan(self)
         from . import patch_queue, waits
         # Finish any previously committed intent, including recovery after crash.
         patch_queue.finalize_pending(self)
@@ -188,6 +191,9 @@ class Hub:
             return result
 
     def dispatch(self, db, method, p, agent, now):
+        if method == 'board_coordination':
+            from .coordination import dispatch
+            return dispatch(self, db, p, agent, now)
         if method == 'patch_queue':
             from .patch_queue import dispatch
             return dispatch(self, db, p, agent, now)
@@ -195,11 +201,12 @@ class Hub:
             from .waits import dispatch
             return dispatch(self, db, p, agent, now)
         if method == 'board_info':
+            from .coordination import hot_files
             identity = db.execute('SELECT inherited_from,successor_id,inherited_at FROM agents WHERE id=?', (agent,)).fetchone()
             return {'service': 'swarmboard', 'version': VERSION, 'schema_version': SCHEMA_VERSION,
                     'workspace': str(self.workspace), 'started_at': self.started_at,
                     'uptime_seconds': max(0, now - self.started_at), 'features': FEATURES,
-                    'max_response_chars': MAX_RESPONSE_CHARS,
+                    'max_response_chars': MAX_RESPONSE_CHARS, 'queue_only_files': hot_files(self),
                     'lineage': dict(identity), 'inheritance_secret_ready': bool(db.execute('SELECT inheritance_hash FROM agents WHERE id=?', (agent,)).fetchone()[0]),
                     'inbox_delivery': {'claude': 'asyncRewake watcher plus tool/prompt previews; requires installed, linked hooks',
                                        'codex': 'tool/prompt previews; no idle wake'}}

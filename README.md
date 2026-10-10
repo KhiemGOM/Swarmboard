@@ -154,7 +154,7 @@ python run_board.py cli --session .board/owner.json job_list
 
 Call `board_info` (or `/board version`) for the running hub version, MCP bridge
 version, compatibility match, schema, uptime, workspace, capabilities and your
-session lineage. Current release: **0.5.1**. Restart the daemon for hub updates
+session lineage. Current release: **0.6.0**. Restart the daemon for hub updates
 and reload MCP connections for bridge/tool updates. Capabilities describe
 available behavior; they do not certify that native hooks are linked and trusted.
 
@@ -219,6 +219,53 @@ still race the final content check. Batch membership has no automatic lease:
 disconnection does not discard work; explicit retirement ends membership while
 preserving accepted patches. Inheritance transfers unfinished patch ownership,
 membership and pending waits. Use `/board queue` for the guided skill flow.
+
+### Relaxing claims, queue-only files and incident alerts
+
+If a direct file claim blocks common-file work, its refused claim response suggests
+`board_coordination action=request_relax, path=FILE, reason=...` (`/board request-relax FILE`).
+This sends one request per requester/claim to the holder's inbox. It grants no
+editing rights. The holder can explain a blocker or stop direct edits and background
+writers, then use `action=relax` (`/board relax FILE`). One SQLite transaction
+converts its exact file claim to queue participation using the current saved file
+as base. Earlier uncommitted work stays its HELD custody; future changes use
+patches. Conversion failure rolls back the claim. Folder claims must be narrowed
+first. Requesters receive an invitation to join and read the base; they are not
+automatically enrolled. Prefer this flow when shared preparation would unblock
+work; claim age alone does not establish hogging.
+
+The human can mark known hot files in the workspace's `.swarmboard.json`:
+
+```json
+{"queue_only": ["src/en.js", "src/vi.js", "style.css", "HANDOFF.md"]}
+```
+
+The list contains at most 64 concrete file paths, each up to 240 characters;
+use the actual paths in your project. No automatic detection or globs. New file
+claims and covering folder claims are refused with queue guidance. Existing
+holders can renew and finish or relax; policy changes do not revoke them. Resource
+mutexes are unaffected. `board_info.queue_only_files` exposes the current list.
+Agents must not edit this configuration to bypass the policy. Patch queues still
+require existing regular UTF-8 files; missing files must be created before marking
+them queue-only.
+
+When a queued file unexpectedly changes or becomes unreadable, the next hub
+interaction broadcasts a system incident inbox message to all active registered
+agents in that workspace, including disconnected sessions for later delivery.
+There is no extra filesystem watcher. Submitting against a changed shared file
+is refused; finalization preserves external edits and the candidate. Recovery
+after the board's own journaled publication does not cause a false incident.
+
+`board_coordination action=report, path=FILE, reason=EVIDENCE` (`/board report FILE`)
+also broadcasts suspected interference, excluding the reporter. Identical reports
+are deduplicated across reporters; automatic alerts deduplicate the same observed
+file state per batch. Ordinary rejected patch overlaps are not incidents. Alerts
+ask agents to check their edits/commands/background writers, stop interference if
+responsible, report facts and confirm the correct workflow. They do not identify
+an author or authorize reverting others' work. Acknowledge after the self-check.
+Legitimate exclusive-holder edits cannot be distinguished from interference
+automatically; report those with evidence. Incident alerts are separate from the
+normal final batch notification.
 
 ### Opt-in waits and old work
 
@@ -375,7 +422,7 @@ See [Codex hooks](https://learn.chatgpt.com/docs/hooks) and
 
 ## Interfaces and verification
 
-Tools include `patch_queue`, `board_wait`, `board_status`, `claim`, `release`, `takeover`, `noticeboard_read`,
+Tools include `board_coordination`, `patch_queue`, `board_wait`, `board_status`, `claim`, `release`, `takeover`, `noticeboard_read`,
 `mutex_claim`, `custody_resolve`, `noticeboard_post`, `inbox_send`, `inbox_read`,
 `inbox_ack`. Unread messages persist until acknowledged. Agent messages do not
 supply human-owner authorization.

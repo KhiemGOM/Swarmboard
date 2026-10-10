@@ -17,6 +17,8 @@ def schema(properties=None, required=None):
 STRING = {"type": "string"}
 IDS = {"type": "array", "items": {"type": "integer"}, "minItems": 1}
 TOOLS = [
+    {'name': 'board_coordination', 'description': 'request_relax sends a deduplicated inbox request to the exact file claim holder. relax converts YOUR exact file claim atomically to patch queue participation, using its current saved content as base and retaining existing work as HELD custody. Stop direct/background writes first. Requesters are notified to join explicitly. Folder locks must be narrowed first. report broadcasts suspected interference with evidence to active workspace agents except the reporter; it does not identify a culprit or authorize repair. Repeated identical incidents are deduplicated.',
+     'inputSchema': schema({'action': {'type': 'string', 'enum': ['request_relax', 'relax', 'report']}, 'path': STRING, 'reason': STRING}, ['action', 'path', 'reason'])},
     {'name': 'patch_queue', 'description': 'Shared patch queue lock for common files. join reserves participation without direct edit permission; read pages the immutable base/candidate or a submitted diff. submit atomically accepts a single-file unified diff against base_hash, rejecting overlapping edits; resubmitting replaces your own prior patch while ACTIVE. release/withdraw closes participation and preserves accepted patches. Last release automatically applies the combined candidate if the shared file still matches the base. One final system inbox message per participant asks you to inspect and run targeted tests. No automatic tests or commits. record_commit resolves your applied patch custody with commit evidence. Existing UTF-8 regular files only; no directories, renames or binary files. Never write the queued file directly.',
      'inputSchema': schema({'action': {'type': 'string', 'enum': ['join', 'read', 'submit', 'release', 'withdraw', 'record_commit']},
                             'path': STRING, 'reason': STRING, 'batch_id': {'type': 'integer', 'minimum': 1},
@@ -87,7 +89,7 @@ for tool in TOOLS:
         tool['description'] += ' Oversized responses error; narrow agent/path/resource filters.'
     tool["annotations"] = {
         "readOnlyHint": tool["name"] in {"board_info", "board_status", "noticeboard_read", "inbox_read", "job_list"},
-        "destructiveHint": tool["name"] in {"takeover", "retire", "inherit", "inheritance_key", "patch_queue"},
+        "destructiveHint": tool["name"] in {"takeover", "retire", "inherit", "inheritance_key", "patch_queue", "board_coordination"},
         "openWorldHint": False,
     }
 

@@ -258,6 +258,8 @@ def dispatch(hub, db, p, agent, now):
     if batch['state'] != 'OPEN' or not member or member[0] != 'ACTIVE':
         raise BoardError('Join this open batch before submitting/releasing; released participants cannot write')
     if action == 'submit':
+        if read_file(hub, batch['path']) != batch['base']:
+            raise BoardError('Shared file changed outside the queue; do not submit more patches. Incident alert sent on the board check; preserve changes and reconcile.')
         if p.get('base_hash') != batch['base_hash']:
             raise BoardError('base_hash must match the immutable batch base')
         proposed_content, edits = proposed(batch['base'], p.get('patch'), batch['path'])

@@ -30,11 +30,20 @@ def dispatch(hub, db, method, p, agent, now):
         reason = p.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise BoardError("A claim reason is required")
+        from .coordination import hot_files
+        hot = [file for file in (hot_files(hub) if files else []) if any(kind == 'file' and hub.overlaps(path, file) for kind, path in entities)]
+        # Grandfather existing claims without allowing a new enclosing folder claim.
+        new_hot = [file for file in hot if any(kind == 'file' and hub.overlaps(path, file) and not
+                   db.execute("SELECT 1 FROM claims WHERE active=1 AND agent=? AND kind='file' AND path=?", (agent, path)).fetchone()
+                   for kind, path in entities)]
+        if new_hot:
+            return {'accepted': False, 'queue_only_files': new_hot, 'reason': 'Queue-only policy: use patch_queue join; narrow folder claims to exclude these files.'}
         conflicts = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1 AND agent!=?", (agent,))
                      if any(kind == r["kind"] and (hub.overlaps(path, r["path"]) if kind == "file" else path == r["path"])
                             for kind, path in entities)]
         if conflicts:
-            return {"accepted": False, "conflicts": conflicts}
+            return {"accepted": False, "conflicts": conflicts,
+                    'next_step': 'For a common file, use board_coordination request_relax with the exact file path and reason. Holder cooperation is required; do not edit or snapshot a queued patch behind a direct writer.'}
         queues = [dict(row) for row in db.execute("SELECT id,path,state FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')")
                   if any(kind == 'file' and hub.overlaps(path, row['path']) for kind, path in entities)]
         if queues:

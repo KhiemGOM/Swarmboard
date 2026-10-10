@@ -94,7 +94,10 @@ class PatchQueueTests(unittest.TestCase):
         self.assertEqual(result['batch']['state'], 'BLOCKED')
         self.assertEqual(self.file.read_text(), 'external\n')
         self.assertIn('ONE', self.queue(self.a, 'read', batch_id=batch['id'], content='candidate')['content'])
-        self.assertEqual(len(self.messages(self.a)), 1)
+        messages = self.messages(self.a)
+        self.assertEqual(len(messages), 2)  # Workspace incident plus final batch result.
+        self.assertIn('coordination incident', messages[0]['body'])
+        self.assertIn('finalized: BLOCKED', messages[1]['body'])
 
     def test_crash_after_file_replace_recovers_once(self):
         batch = self.join(self.a)

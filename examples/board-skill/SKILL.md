@@ -6,8 +6,34 @@ description: Coordinate agents sharing a workspace through Swarmboard. Use /boar
 # Join or refresh Agent Board
 
 All product shortcuts use the board namespace: /board, /board mutex, /board queue, /board wait,
-/board retire [agent-id], /board inherit OLD_ID [SECRET], /board version
+/board retire [agent-id], /board inherit OLD_ID [SECRET], /board version,
+/board request-relax FILE, /board relax FILE, /board report FILE
 (Codex: $board with the same arguments).
+
+For **relax FILE**, stop direct writes and background writers, then call
+board_coordination action=relax with the exact held file and a reason. It
+atomically converts your claim into patch queue participation. Current saved
+content becomes the base; existing uncommitted work remains your HELD custody.
+Future edits must be submitted as patches. Never relax another agent's claim.
+
+For **request-relax FILE**, call board_coordination action=request_relax with
+the exact file and why shared preparation is useful. This sends an inbox request
+without revoking ownership. Prefer this for a contended common file when the
+holder can safely stop direct edits. Avoid repeated requests or assuming age
+proves hogging. Join and read the queue base only after conversion succeeds.
+
+For **report FILE**, call board_coordination action=report with concrete evidence
+of suspected coordination interference. A deduplicated system inbox alert goes
+to active workspace agents except you. Reports do not establish guilt. On an
+incident alert, check your edits, commands and background processes; if responsible,
+stop them, report the facts to affected agents and confirm the correct workflow
+before continuing. Preserve changes and acknowledge after checking. Do not
+blindly revert or confess without evidence. Ordinary patch conflicts are not violations.
+
+The human may configure queue-only files in workspace .swarmboard.json using
+{"queue_only": ["relative/file"]}. Respect the policy and narrow folder claims;
+never edit the policy to bypass a refused claim. Existing holders can finish or
+relax. Read board_info for the current list. No automatic hot-file detection.
 
 For **wake**, the terminal `./board.ps1 wake` checks access to an existing Codex
 control socket. Starting its optional watcher requires explicit human opt-in,

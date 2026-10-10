@@ -40,11 +40,15 @@ def main():
         replies = [json.loads(line) for line in result.stdout.splitlines()]
         assert len(replies) == 7, result.stderr
         assert all("result" in reply for reply in replies), replies
-        assert len(replies[1]["result"]["tools"]) == 23
-        assert {'patch_queue', 'board_wait'} <= {tool['name'] for tool in replies[1]['result']['tools']}
+        assert len(replies[1]["result"]["tools"]) == 24
+        assert {'board_coordination', 'patch_queue', 'board_wait'} <= {tool['name'] for tool in replies[1]['result']['tools']}
+        coordination = next(t for t in replies[1]['result']['tools'] if t['name'] == 'board_coordination')
+        assert set(coordination['inputSchema']['properties']['action']['enum']) == {'request_relax', 'relax', 'report'}
         info = json.loads(replies[6]['result']['content'][0]['text'])
         assert not replies[6]['result']['isError'] and info['version_match'] and info['version'] == VERSION, info
         assert info['max_response_chars'] == 24000
+        assert {'claim_relaxation', 'queue_only_policy', 'coordination_incidents'} <= set(info['features'])
+        assert isinstance(info['queue_only_files'], list)
         properties = next(t for t in replies[1]['result']['tools'] if t['name'] == 'board_status')['inputSchema']['properties']
         assert {'target_agent_id', 'paths', 'resources', 'include_rules'} <= properties.keys()
         status = json.loads(replies[2]["result"]["content"][0]["text"])
@@ -65,7 +69,7 @@ def main():
         assert entity['matches'][0]['query'] == 'git:index'
         assert all(c['kind'] == 'resource' and c['path'] == 'git:index' for c in entity['claims'])
         ids.append(status["your_agent_id"])
-        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 23, 'version': info['version'], "workspace": status["workspace"],
+        print(json.dumps({"harness": name, "agent_id": ids[-1], "tools": 24, 'version': info['version'], "workspace": status["workspace"],
                           "workspace_status_chars": len(replies[2]['result']['content'][0]['text']),
                           "self_status_chars": len(replies[4]['result']['content'][0]['text']), 'entity_query': 'passed'}))
     assert len(set(ids)) == len(ids)
