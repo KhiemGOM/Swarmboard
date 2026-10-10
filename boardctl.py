@@ -11,12 +11,17 @@ from board.runtime import ensure_hub
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', nargs='?', choices=['start', 'status', 'mutex', 'jobs', 'retire'], default='start')
+    parser.add_argument('command', nargs='?', choices=['start', 'status', 'mutex', 'jobs', 'retire', 'wake'], default='start')
     parser.add_argument('agent_id', nargs='?', help='Exact agent ID for retire; terminal cannot infer a chat identity')
     parser.add_argument('--reason', default='Owner declared this agent unavailable')
     parser.add_argument('--workspace')
     parser.add_argument('--database')
     parser.add_argument('--port', type=int)
+    parser.add_argument('--thread-id')
+    parser.add_argument('--socket')
+    parser.add_argument('--codex', default='codex')
+    parser.add_argument('--once', action='store_true')
+    parser.add_argument('--include-existing', action='store_true')
     parser.add_argument('--config', type=Path, default=Path(__file__).resolve().parent / '.board/operator.json')
     args = parser.parse_args()
     try:
@@ -25,6 +30,11 @@ def main():
         workspace = Path(args.workspace or saved.get('workspace') or Path.cwd()).resolve()
         database = Path(args.database or (None if args.workspace else saved.get('database')) or workspace / '.board/hub.sqlite').resolve()
         port = args.port or saved.get('port', 4317)
+        if args.command == 'wake':
+            from board.codex_wake import run
+            print(json.dumps(run(database, workspace, args.agent_id, args.thread_id,
+                                 args.codex, args.socket, args.once, args.include_existing)))
+            return
         if args.command == 'start':
             print(json.dumps(ensure_hub(f'http://127.0.0.1:{port}', workspace, database, autostart=True)))
             return

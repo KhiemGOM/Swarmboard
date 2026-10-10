@@ -9,6 +9,12 @@ All product shortcuts use the board namespace: /board, /board mutex, /board queu
 /board retire [agent-id], /board inherit OLD_ID [SECRET], /board version
 (Codex: $board with the same arguments).
 
+For **wake**, the terminal `./board.ps1 wake` checks access to an existing Codex
+control socket. Starting its optional watcher requires explicit human opt-in,
+the exact agent ID and `-ThreadId` from its native hook binding. See the checkout
+README for setup. Never guess a chat ID, start a replacement Codex server, or
+enable the watcher automatically. Native Codex hooks still cannot wake idle chats.
+
 For **version**, call board_info and report hub/bridge versions, mismatch if any,
 workspace and capabilities. Capability reporting does not verify native hooks.
 

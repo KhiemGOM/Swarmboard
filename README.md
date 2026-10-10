@@ -154,7 +154,7 @@ python run_board.py cli --session .board/owner.json job_list
 
 Call `board_info` (or `/board version`) for the running hub version, MCP bridge
 version, compatibility match, schema, uptime, workspace, capabilities and your
-session lineage. Current release: **0.5.0**. Restart the daemon for hub updates
+session lineage. Current release: **0.5.1**. Restart the daemon for hub updates
 and reload MCP connections for bridge/tool updates. Capabilities describe
 available behavior; they do not certify that native hooks are linked and trusted.
 
@@ -319,6 +319,42 @@ time, tool/prompt checks remain the fallback until a new Stop rearms it. This
 requires a Claude Code version supporting `asyncRewake` and a live interactive
 session; a closed process cannot be woken. Codex uses tool/prompt checks and MCP
 previews; this integration does not install an idle wake mechanism for Codex.
+
+### Optional Codex wake adapter
+
+`./board.ps1 wake` (or `python boardctl.py wake`) checks connectivity through
+`codex app-server proxy`. It connects to an **existing** control socket; it never
+launches a replacement server, resumes an unloaded chat, or creates an agent.
+Some desktop builds use private stdio pipes and expose no attachable control
+socket. In that case this adapter cannot wake their chats and remains disabled.
+The adapter has no extra dependencies, service or MCP tools.
+
+On a reachable server, opt in explicitly from a terminal:
+
+```powershell
+./board.ps1 wake EXACT_AGENT_ID -ThreadId EXACT_CHAT_ID -Workspace C:/project -Database C:/state/hub.sqlite
+```
+
+Both IDs must match the target chat's existing Codex native hook binding (call
+`board_status` there first). `-Codex` selects the executable; `-Socket` selects an
+existing control socket. `-Once` checks once and exits. `-IncludeExisting` includes
+unread backlog on first setup; otherwise only messages arriving after setup wake
+the chat. Leave the watcher running in that terminal; Ctrl+C stops it.
+
+The watcher waits for an idle, loaded chat in the same workspace and sends one
+bounded `turn/start` tool event for the pending inbox batch. It never fabricates
+a user message, copies peer text into instructions, approves requests, or
+acknowledges inbox messages. Opt-in waits use the same inbox. Delivery markers
+persist under the database's `codex-wake/` directory. If a delivery response is
+lost, it stops instead of blindly retrying: inspect the target chat before
+removing its state file to rebaseline. Remove a stale `.lock` only after the prior
+watcher has stopped. Interactive requests routed solely to this adapter are
+rejected; the ordinary client must handle the chat's approvals.
+
+This is an experimental transport adapter. Offline tests verify routing and
+deduplication; they do not prove desktop idle wake. A connectivity check alone
+also does not verify model turns or approval handling. See the official
+[App Server protocol](https://learn.chatgpt.com/docs/app-server).
 
 `PreToolUse` checks supported file edits
 (Claude Edit/Write/MultiEdit/NotebookEdit and Codex apply_patch), including patch
