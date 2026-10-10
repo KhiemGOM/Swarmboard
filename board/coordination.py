@@ -1,6 +1,7 @@
 """Explicit hot-file policy, cooperative lock conversion and incident inboxes."""
 import hashlib
 import json
+import re
 import time
 
 from .core import BoardError
@@ -77,21 +78,66 @@ def scan(hub):
                 if current == batch['base'] or (batch['state'] == 'APPLYING' and current == batch['candidate']):
                     continue
                 signature = [batch['id'], digest(current)]
-                evidence = f'Queued file differs from recorded base in batch #{batch["id"]}. No author is known.'
+                evidence = json.dumps({'reason': f'Queued file differs from recorded base in batch #{batch["id"]}. No author is known.',
+                                       'before_hash': batch['base_hash'], 'after_hash': digest(current),
+                                       'before_verification': 'recorded_queue_base', 'after_verification': 'observed_file_bytes'})
             except BoardError as exc:
                 signature = [batch['id'], str(exc)]
-                evidence = f'Queued file cannot be read in batch #{batch["id"]}: {str(exc)[:500]}'
+                evidence = json.dumps({'reason': f'Queued file cannot be read in batch #{batch["id"]}: {str(exc)[:500]}',
+                                       'before_hash': batch['base_hash'], 'after_hash': None, 'after_verification': 'unreadable'})
             incident(hub, db, batch['path'], 'queued_file_changed', evidence, signature=signature)
 
 
 def dispatch(hub, db, p, agent, now):
     action = p.get('action')
     path = hub.path(p.get('path'))
+    if action == 'history':
+        after, limit = p.get('after_id', 0), p.get('limit', 5)
+        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 10:
+            raise BoardError('history after_id must be nonnegative and limit must be 1 to 10')
+        records = [dict(row) for row in db.execute('SELECT id,kind,reporter,evidence,created FROM coordination_incidents WHERE path=? AND id>? ORDER BY id LIMIT ?', (path, after, limit))]
+        for record in records:
+            try:
+                record['evidence'] = json.loads(record['evidence'])
+            except ValueError:
+                record['evidence'] = {'reason': record['evidence']}  # Keep historical free-text reports.
+        return {'path': path, 'incidents': records, 'next_after_id': records[-1]['id'] if records else after,
+                'instructions': 'Durable file custody history; inbox acknowledgments and ownership changes do not remove it. Evidence of a change does not identify its author.'}
     reason = p.get('reason')
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
         raise BoardError('A reason/evidence of 1 to 1000 characters is required')
     if action == 'report':
-        return incident(hub, db, path, 'reported_interference', reason, reporter=agent)
+        hashes = [p.get(key) for key in ('before_hash', 'after_hash')]
+        if any(not isinstance(value, str) or not re.fullmatch('[0-9a-fA-F]{64}', value) for value in hashes):
+            raise BoardError('report requires before_hash and after_hash: SHA-256 of raw file bytes, each 64 hex characters')
+        before, after = (value.lower() for value in hashes)
+        if before == after:
+            raise BoardError('Report hashes are identical; no content change is evidenced')
+        file = hub.workspace / path
+        try:
+            if not file.is_file() or file.stat().st_size > 16 * 1024 * 1024:
+                raise BoardError('Hash reports require an existing regular file up to 16 MiB')
+            observed = hashlib.sha256()
+            with file.open('rb') as stream:
+                total = 0
+                for chunk in iter(lambda: stream.read(65536), b''):
+                    total += len(chunk)
+                    if total > 16 * 1024 * 1024:
+                        raise BoardError('Report file grew beyond 16 MiB')
+                    observed.update(chunk)
+        except OSError as exc:
+            raise BoardError('Cannot verify report file: ' + str(exc)) from exc
+        if observed.hexdigest() != after:
+            raise BoardError('after_hash does not match current raw file bytes; recheck before reporting')
+        batch = db.execute("SELECT base_hash FROM patch_batches WHERE path=? AND state IN ('OPEN','READY','APPLYING')", (path,)).fetchone()
+        if batch and before != batch['base_hash']:
+            raise BoardError('before_hash must match the recorded queue base for this file')
+        evidence = {'reason': reason, 'before_hash': before, 'after_hash': after,
+                    'before_verification': 'recorded_queue_base' if batch else 'reporter_provided',
+                    'after_verification': 'current_file_bytes'}
+        return {**incident(hub, db, path, 'reported_interference', json.dumps(evidence), reporter=agent,
+                           signature=[before, after]), **evidence,
+                'custody_history': {'action': 'history', 'path': path}}
     claims = [r for r in db.execute("SELECT * FROM claims WHERE active=1 AND kind='file'") if hub.overlaps(path, r['path'])]
     if len(claims) != 1 or claims[0]['path'] != path:
         raise BoardError('Relax needs one exact file claim; folder holders must narrow their claims first')

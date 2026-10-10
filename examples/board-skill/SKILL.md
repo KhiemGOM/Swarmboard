@@ -22,13 +22,29 @@ without revoking ownership. Prefer this for a contended common file when the
 holder can safely stop direct edits. Avoid repeated requests or assuming age
 proves hogging. Join and read the queue base only after conversion succeeds.
 
-For **report FILE**, call board_coordination action=report with concrete evidence
-of suspected coordination interference. A deduplicated system inbox alert goes
+For **report FILE**, call board_coordination action=report with the exact file,
+reason, before_hash and after_hash (different 64-character SHA-256 hashes of raw
+bytes). Capture a before hash when inspecting a file; never invent it. The after
+hash must match the current file. A live queue requires its recorded base_hash as
+the before hash; otherwise that historical hash is explicitly reporter-provided.
+Reports without valid hash evidence are refused. Reports of the same path/hash
+pair deduplicate even when their reasons differ. A system inbox alert goes
 to active workspace agents except you. Reports do not establish guilt. On an
 incident alert, check your edits, commands and background processes; if responsible,
 stop them, report the facts to affected agents and confirm the correct workflow
 before continuing. Preserve changes and acknowledge after checking. Do not
 blindly revert or confess without evidence. Ordinary patch conflicts are not violations.
+If evidence points to a particular agent, use inbox_send to ask it to pause the
+suspected interfering writes and inspect its commands/background processes.
+Include the path and hashes, explain the suspicion, and ask for facts; do not
+assert guilt. The human-authorized coordination workflow includes this targeted
+contact. Noticeboard posts are not a substitute for that direct inbox message.
+Reports persist in the file's custody history. Use board_coordination action=history,
+path=FILE, after_id=0, limit=5 to inspect; page with next_after_id (limit at most 10).
+Inbox acknowledgment and custody transfers do not remove the evidence. Custody
+status links to this history when reports exist. Manual hash reports require a
+currently readable regular file up to 16 MiB; automatic queue alerts can record
+an unreadable/deleted file with after_hash=null rather than inventing a hash.
 
 The human may configure queue-only files in workspace .swarmboard.json using
 {"queue_only": ["relative/file"]}. Respect the policy and narrow folder claims;

@@ -43,7 +43,8 @@ def main():
         assert len(replies[1]["result"]["tools"]) == 24
         assert {'board_coordination', 'patch_queue', 'board_wait'} <= {tool['name'] for tool in replies[1]['result']['tools']}
         coordination = next(t for t in replies[1]['result']['tools'] if t['name'] == 'board_coordination')
-        assert set(coordination['inputSchema']['properties']['action']['enum']) == {'request_relax', 'relax', 'report'}
+        assert set(coordination['inputSchema']['properties']['action']['enum']) == {'request_relax', 'relax', 'report', 'history'}
+        assert {'before_hash', 'after_hash', 'after_id', 'limit'} <= coordination['inputSchema']['properties'].keys()
         info = json.loads(replies[6]['result']['content'][0]['text'])
         assert not replies[6]['result']['isError'] and info['version_match'] and info['version'] == VERSION, info
         assert info['max_response_chars'] == 24000

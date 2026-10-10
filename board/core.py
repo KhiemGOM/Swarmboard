@@ -259,6 +259,10 @@ class Hub:
                         holders.update(row[0] for row in db.execute('SELECT agent FROM patch_members WHERE batch_id=?', (queued['id'],)))
                 agents = [row for row in agents if row['id'] in holders]
             for row in custody:
+                incidents = db.execute('SELECT COUNT(*) FROM coordination_incidents WHERE path=?', (row['path'],)).fetchone()[0]
+                if incidents:
+                    row['incident_count'] = incidents
+                    row['custody_history'] = {'tool': 'board_coordination', 'action': 'history', 'path': row['path']}
                 age = db.execute('SELECT since FROM custody_age WHERE path=?', (row['path'],)).fetchone()
                 row['unresolved_since'] = age[0] if age else None
                 row['age_warning'] = row['state'] == 'HELD' and bool(age and now - age[0] >= 7200)
