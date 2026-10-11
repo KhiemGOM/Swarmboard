@@ -48,6 +48,46 @@ class HookTests(unittest.TestCase):
     def bind(self):
         return self.event('PostToolUse', tool_name='mcp__board__board_status', tool_response={'content': [{'type': 'text', 'text': json.dumps({'your_agent_id': self.agent['agent_id']})}]})
 
+    def test_workspace_required_hook_gives_usable_order(self):
+        reply = self.event('PostToolUse', tool_name='mcp__board__board_status',
+                           tool_response={'isError': True, 'content': [{'type': 'text', 'text': json.dumps({'error': 'WORKSPACE_REQUIRED: choose project'})}]})
+        self.assertIn('then board_status', reply['hookSpecificOutput']['additionalContext'])
+        self.assertNotIn('shared inbox', reply['hookSpecificOutput']['additionalContext'])
+
+    def test_codex_hook_link_automatically_restores_wake(self):
+        self.adapter.harness = 'codex'
+        self.bind()
+        status = self.call('board_desktop_wake', action='status')
+        self.assertTrue(status['enabled'])
+        self.assertEqual(status['thread_id'], 'native-session')
+        with self.hub.connect() as db:
+            db.execute('DELETE FROM desktop_wake_bindings')
+        self.event('UserPromptSubmit')
+        self.assertTrue(self.call('board_desktop_wake', action='status')['enabled'])
+        self.event('UserPromptSubmit')
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM desktop_wake_bindings').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM desktop_wake_deliveries').fetchone()[0], 0)
+
+    def test_claude_hook_link_does_not_register_codex_wake(self):
+        self.bind()
+        self.assertFalse(self.call('board_desktop_wake', action='status')['enabled'])
+
+    def test_existing_native_identity_conflict_is_not_accused_of_other_chat(self):
+        import hashlib
+        key = hashlib.sha256(b'claude:native-session').hexdigest()
+        canonical = self.hub.call('register', {'name': 'claude-code', 'native_harness': 'claude', 'native_session_key': key})
+        reply = self.bind()
+        message = reply['hookSpecificOutput']['additionalContext']
+        self.assertIn(canonical['agent_id'], message)
+        self.assertIn('already assigned identity', message)
+        self.assertIn('Desktop Chat config overrides', message)
+        self.assertNotIn('belongs to another native chat', message)
+        prompt = self.event('UserPromptSubmit')['hookSpecificOutput']['additionalContext']
+        self.assertIn('identity mismatch', prompt)
+        blocked = self.event('PreToolUse', tool_name='Write', tool_input={'file_path':str(self.root/'a.py')})
+        self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
+
     def test_queue_member_cannot_directly_edit_queued_file(self):
         path = self.root / 'common.py'
         path.write_text('original\n')
@@ -97,12 +137,76 @@ class HookTests(unittest.TestCase):
         self.assertEqual(status['state'], 'OPEN')
         self.assertIsNone(status['commit_hash'])
 
+    def test_late_native_end_with_stale_credentials_does_not_disconnect(self):
+        self.bind()
+        with self.hub.connect() as db:
+            db.execute('UPDATE agents SET token=? WHERE id=?',('new-connection-token',self.agent['agent_id']))
+        self.assertEqual(self.event('SessionEnd'),{})
+        with self.hub.connect() as db:
+            self.assertIsNone(db.execute('SELECT disconnected FROM agents WHERE id=?',(self.agent['agent_id'],)).fetchone()[0])
+
+    def test_retired_native_end_exits_without_hook_error(self):
+        self.bind()
+        other = self.hub.call('register',{'name':'owner action'})
+        self.hub.call('retire',{**other,'target_agent_id':self.agent['agent_id'],'reason':'retired'})
+        self.assertEqual(self.event('SessionEnd'),{})
+
     def test_outside_workspace_and_nonboard_outputs_do_not_bind(self):
         outside = self.root.parent
         self.assertEqual(self.adapter.handle({'cwd': str(outside), 'hook_event_name': 'PreToolUse'}), {})
         self.event('PostToolUse', tool_name='mcp__other__tool', tool_response={'your_agent_id': self.agent['agent_id']})
         states = list((self.root / 'hook-sessions').glob('*.json'))
         self.assertTrue(all('agent_id' not in json.loads(path.read_text()) for path in states))
+
+    def test_large_notice_backlog_pages_safely_for_bash_and_edit(self):
+        self.bind()
+        self.call('claim', paths=['a.py'], reason='Authorized edit')
+        requests = []
+        def caller(url, method, params):
+            if method == 'noticeboard_read':
+                requests.append(dict(params))
+            return self.hub.call(method, params)
+        self.adapter.caller = caller
+        last_id = 0
+        for tool, arguments in [('Bash', {'command': 'python --version'}),
+                                ('Edit', {'file_path': str(self.root / 'a.py')})]:
+            for index in range(7):
+                last_id = self.call('noticeboard_post', body=f'{tool} notice {index}: ' + 'x' * 4700)['id']
+            with self.assertRaisesRegex(BoardError, 'RESPONSE_TOO_LARGE'):
+                self.call('noticeboard_read')
+            requests.clear()
+            output = self.event('PreToolUse', tool_name=tool, tool_input=arguments)['hookSpecificOutput']
+            self.assertNotIn('permissionDecision', output)
+            self.assertIn(f'{tool} notice 6', output['additionalContext'])
+            self.assertEqual(len(requests), 8)  # Seven single posts plus the empty terminal page.
+            self.assertTrue(all(request['limit'] == 1 for request in requests))
+            self.assertEqual(requests[-1]['after_id'], last_id)
+            state_path = next((self.root / 'hook-sessions').glob('*.json'))
+            self.assertEqual(json.loads(state_path.read_text())['after_id'], last_id)
+            # Restarted adapters resume the saved cursor instead of rereading history.
+            self.adapter = Adapter(self.root, self.db, 'claude', caller=caller)
+            requests.clear()
+            self.event('PreToolUse', tool_name=tool, tool_input=arguments)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0]['after_id'], last_id)
+
+    def test_post_action_deletion_cleanup_uses_shared_function(self):
+        self.bind()
+        path = self.root / 'a.py'
+        path.write_text('remove me')
+        self.call('claim', paths=['a.py'], reason='Remove obsolete file')
+        requests = []
+        def caller(url, method, params):
+            requests.append((method, params))
+            return self.hub.call(method, params)
+        self.adapter.caller = caller
+        path.unlink()
+        self.event('PostToolUse', tool_name='Bash', tool_input={'command': 'rm a.py'})
+        self.assertTrue(any(method == 'board_file' and params['action'] == 'reconcile' for method, params in requests))
+        status = self.call('board_status')
+        self.assertEqual(status['claims'], [])
+        self.assertEqual(status['custody'][0]['filesystem_state'], 'deleted')
+        self.assertEqual(len(self.call('board_file', action='history', path='a.py')['records']), 1)
 
     def test_hooks_request_focused_status(self):
         requests = []

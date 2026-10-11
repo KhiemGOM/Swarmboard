@@ -55,10 +55,12 @@ class Hub:
             patch_queue.initialize(db)
             waits.initialize(db)
             coordination.initialize(db)
+            from .sessions import migrate
+            migrate(db)
             if "disconnected" not in {row[1] for row in db.execute("PRAGMA table_info(agents)")}:
                 db.execute("ALTER TABLE agents ADD COLUMN disconnected REAL")
             columns = {row[1] for row in db.execute('PRAGMA table_info(agents)')}
-            for name, kind in [('inheritance_hash', 'TEXT'), ('inherited_from', 'TEXT'), ('successor_id', 'TEXT'), ('inherited_at', 'REAL')]:
+            for name, kind in [('inheritance_hash', 'TEXT'), ('inherited_from', 'TEXT'), ('successor_id', 'TEXT'), ('inherited_at', 'REAL'), ('name_chosen', 'INTEGER NOT NULL DEFAULT 0')]:
                 if name not in columns:
                     db.execute(f'ALTER TABLE agents ADD COLUMN {name} {kind}')
             if "kind" not in {row[1] for row in db.execute("PRAGMA table_info(claims)")}:
@@ -100,6 +102,8 @@ class Hub:
                    (kind, agent, json.dumps(payload), time.time()))
 
     def call(self, method, params):
+        if method == 'session_end':
+            return self._call(method,params)
         from .coordination import scan
         scan(self)
         from . import patch_queue, waits
@@ -121,6 +125,9 @@ class Hub:
                 if count != result.get('unread_inbox'):
                     result['unread_inbox'] = count
                     result['inbox_reminder'] = f'You have {count} unread message(s). Call inbox_read, then inbox_ack after processing.'
+            if params.get('agent_id') and not result.get('stop_session'):
+                from .desktop_wake import reminder
+                result.update(reminder(db, params['agent_id']))
         return result
 
     def _call(self, method, params):
@@ -143,9 +150,28 @@ class Hub:
                 name = params.get("name", "agent")
                 if not isinstance(name, str) or not name.strip():
                     raise BoardError("Agent name is required")
+                harness, key = params.get('native_harness'), params.get('native_session_key')
+                if harness is not None or key is not None:
+                    import re
+                    if harness not in ('codex', 'claude', 'claude-code', 'claude-desktop') or not isinstance(key, str) or not re.fullmatch('[0-9a-f]{64}', key):
+                        raise BoardError('Invalid native adapter session binding')
+                    prior = db.execute('SELECT a.* FROM native_sessions n JOIN agents a ON a.id=n.agent WHERE n.harness=? AND n.session_key=?', (harness, key)).fetchone()
+                    if prior:
+                        if prior['state'] != 'active' or prior['successor_id']:
+                            raise BoardError('Native chat identity is retired; no automatic replacement registration')
+                        token = secrets.token_urlsafe(32)
+                        db.execute('UPDATE agents SET token=?,seen=?,disconnected=NULL WHERE id=?', (token, now, prior['id']))
+                        from .inheritance import issue
+                        return {'agent_id': prior['id'], 'session_token': token, 'workspace': str(self.workspace),
+                                'inheritance_secret': issue(db, prior['id']), 'instructions': COORDINATION_RULES, 'resumed': True}
                 agent = secrets.token_hex(8)
+                while db.execute('SELECT 1 FROM agents WHERE id=?', (agent,)).fetchone():
+                    agent = secrets.token_hex(8)
                 token = secrets.token_urlsafe(32)
                 db.execute("INSERT INTO agents(id,name,token,state,started,seen,reason) VALUES (?,?,?,'active',?,?,NULL)", (agent, name, token, now, now))
+                if key is not None:
+                    from .sessions import bind
+                    bind(db, harness, key, agent)
                 from .inheritance import issue
                 handoff = issue(db, agent)
                 self.event(db, "registered", agent, {"name": name})
@@ -159,9 +185,26 @@ class Hub:
             if not identity or not secrets.compare_digest(identity["token"], str(params.get("session_token", ""))):
                 raise BoardError("Unknown agent or invalid session token")
             if identity["state"] != "active":
-                raise BoardError("Session retired. Register a new session and obtain fresh claims.")
+                raise BoardError("Session retired. Stop using this identity; no automatic replacement registration.")
+            if method == 'session_end':
+                # Token validation fences a late hook from an older connection.
+                # Skip scans and previews to stay within native hook budgets.
+                from .jobs import disconnect, text
+                if identity['disconnected'] is not None:
+                    return {'disconnected_agent':agent,'already_disconnected':True}
+                return disconnect(self,db,agent,now,text(params.get('reason'),'reason'))
             db.execute("UPDATE agents SET seen=?,disconnected=NULL WHERE id=?", (now, agent))
+            from . import file_lifecycle
+            if method not in ('board_file', 'board_cleanup'):
+                file_lifecycle.reconcile(self, db, agent, now)
+            else:
+                file_lifecycle.initialize(db)
             result = self.dispatch(db, method, params, agent, now)
+            own = db.execute('SELECT name,name_chosen FROM agents WHERE id=?', (agent,)).fetchone()
+            result['your_name'] = own['name']
+            if not own['name_chosen'] and not result.get('stop_session'):
+                result['name_reminder'] = 'Name yourself with board_agent_name now. Be creative and memorable: a human name, pop reference, meme, sarcastic nickname, light roast, or joke about your job or the owner\'s known context. Avoid generic plant-plus-role names; do not invent personal facts. Keep it short and readable. Choose it yourself without asking the human, and keep it across reconnects; your identity stays the same.'
+            file_lifecycle.reconcile(self, db, agent, now)
             unread = db.execute("SELECT COUNT(*) FROM messages WHERE recipient=? AND acknowledged IS NULL", (agent,)).fetchone()[0]
             result["unread_inbox"] = unread
             if unread:
@@ -193,6 +236,26 @@ class Hub:
             return result
 
     def dispatch(self, db, method, p, agent, now):
+        if method == 'board_agent_name':
+            import unicodedata
+            name = p.get('name')
+            if not isinstance(name,str) or not 1 <= len(name.strip()) <= 64 or any(unicodedata.category(c).startswith('C') for c in name):
+                raise BoardError('Name must be 1 to 64 readable characters with no control characters')
+            if 'target_agent_id' in p:
+                raise BoardError('You can name only your own agent')
+            name = name.strip()
+            if any(row['name'].casefold()==name.casefold() for row in db.execute("SELECT name FROM agents WHERE id<>? AND state='active' AND name_chosen=1", (agent,))):
+                raise BoardError('Name already belongs to another active agent; choose a distinguishable name')
+            before = db.execute('SELECT name FROM agents WHERE id=?',(agent,)).fetchone()[0]
+            db.execute('UPDATE agents SET name=?,name_chosen=1 WHERE id=?',(name,agent))
+            self.event(db,'agent_named',agent,{'previous_name':before,'name':name})
+            return {'agent_id':agent,'name':name,'identity_unchanged':True}
+        if method == 'native_reconnect':
+            from .sessions import reconnect
+            return reconnect(self, db, p, agent, now)
+        if method == 'board_desktop_wake':
+            from .desktop_wake import dispatch
+            return dispatch(db, self, p, agent, now)
         if method == 'board_coordination':
             from .coordination import dispatch
             return dispatch(self, db, p, agent, now)
@@ -211,7 +274,7 @@ class Hub:
                     'max_response_chars': MAX_RESPONSE_CHARS, 'queue_only_files': hot_files(self),
                     'lineage': dict(identity), 'inheritance_secret_ready': bool(db.execute('SELECT inheritance_hash FROM agents WHERE id=?', (agent,)).fetchone()[0]),
                     'inbox_delivery': {'claude': 'asyncRewake watcher plus tool/prompt previews; requires installed, linked hooks',
-                                       'codex': 'tool/prompt previews; no idle wake'}}
+                                       'codex': 'native codex queue on new inbox arrival only; requires a verified native chat binding and a connected MCP bridge; no scheduled model relay'}}
         if method == 'inheritance_key':
             from .inheritance import issue
             return {'inheritance_secret': issue(db, agent), 'predecessor_agent_id': agent,
@@ -262,6 +325,11 @@ class Hub:
                         holders.update(row[0] for row in db.execute('SELECT agent FROM patch_members WHERE batch_id=?', (queued['id'],)))
                 agents = [row for row in agents if row['id'] in holders]
             for row in custody:
+                observed = db.execute('SELECT present FROM file_observations WHERE path=?', (row['path'],)).fetchone()
+                if observed:
+                    row['filesystem_state'] = 'present' if observed[0] else 'deleted'
+                    if not observed[0]:
+                        row['deletion_history'] = {'tool': 'board_file', 'action': 'history', 'path': row['path']}
                 incidents = db.execute('SELECT COUNT(*) FROM coordination_incidents WHERE path=?', (row['path'],)).fetchone()[0]
                 if incidents:
                     row['incident_count'] = incidents
@@ -300,6 +368,15 @@ class Hub:
         if method.startswith('job_'):
             from .jobs import dispatch
             return dispatch(self, db, method, p, agent, now)
+        if method == 'board_cleanup':
+            from .file_lifecycle import cleanup
+            return cleanup(self, db, agent, now)
+        if method == 'board_file':
+            from .file_lifecycle import dispatch
+            return dispatch(self, db, p, agent, now)
+        if method == 'workspace_leave':
+            from .workspace import leave
+            return leave(self, db, p, agent, now)
         if method == 'disconnect':
             from .jobs import disconnect, text
             return disconnect(self, db, agent, now, text(p.get('reason'), 'reason'))
@@ -316,7 +393,8 @@ class Hub:
                 raise BoardError("Target must be an active registered session")
             from .jobs import recover_untracked
             recover_untracked(self, db, target, now, reason)
-            db.execute("UPDATE agents SET state='retired',reason=? WHERE id=?", (reason, target))
+            from .sessions import invalidate
+            invalidate(db, target, now, reason, agent)
             # Transfer all live claims atomically; the original session loses access immediately.
             db.execute("UPDATE claims SET agent=?,expires=? WHERE agent=? AND active=1", (agent, now + 7200, target))
             db.execute("UPDATE custody SET owner=?,updated=? WHERE owner=? AND state!='COMMITTED'", (agent, now, target))
@@ -336,16 +414,14 @@ class Hub:
                 cursor = db.execute("INSERT INTO posts(agent,body,created) VALUES (?,?,?)", (agent, body, now))
             else:
                 recipient = p.get("recipient_agent_id")
-                if not db.execute("SELECT 1 FROM agents WHERE id=?", (recipient,)).fetchone():
+                destination = db.execute('SELECT state,disconnected,successor_id FROM agents WHERE id=?', (recipient,)).fetchone()
+                if not destination:
                     raise BoardError("Unknown recipient")
-                # Follow recorded succession so late replies reach the current session.
-                for _ in range(100):
-                    successor = db.execute('SELECT successor_id FROM agents WHERE id=?', (recipient,)).fetchone()[0]
-                    if not successor:
-                        break
-                    recipient = successor
-                else:
-                    raise BoardError('Inheritance chain exceeds supported length')
+                if destination['state'] != 'active':
+                    successor = destination['successor_id']
+                    raise BoardError('Recipient is retired; message rejected.' + (f' Address successor {successor} explicitly.' if successor else ''))
+                if destination['disconnected'] is not None:
+                    raise BoardError('Recipient is disconnected; message rejected. Check its current identity before retrying.')
                 cursor = db.execute("INSERT INTO messages(sender,recipient,body,created) VALUES (?,?,?,?)", (agent, recipient, body, now))
             self.event(db, method, agent, {"id": cursor.lastrowid})
             return {"id": cursor.lastrowid}

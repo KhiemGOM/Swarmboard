@@ -40,8 +40,8 @@ def main():
     python = str(Path(sys.executable).resolve())
     key = hashlib.sha256(os.path.normcase(str(workspace)).encode()).hexdigest()[:16]
     database = Path(options.database).resolve() if options.database else root / ".board/workspaces" / key / "hub.sqlite"
-    args = [str(root / "run_board.py"), "mcp", "--workspace", str(workspace),
-            "--database", str(database), "--url", f"http://127.0.0.1:{options.port}", "--autostart"]
+    # All global connections select locally; project routes live below the workspace.
+    code_args = [str(root / "run_board.py"), "mcp", "--autostart"]
     # Supported harness commands preserve unrelated server entries.
     codex = shutil.which("codex")
     claude = shutil.which("claude")
@@ -50,7 +50,7 @@ def main():
     existing = codex_config.read_text(encoding="utf-8") if codex_config.exists() else ""
     if re.search(r"(?m)^\[mcp_servers\.board\]", existing):
         subprocess.run([codex, "mcp", "remove", "board"], check=True, capture_output=True)
-    subprocess.run([codex, "mcp", "add", "board", "--", python, *args, "--name", "codex"],
+    subprocess.run([codex, "mcp", "add", "board", "--", python, str(root / "run_board.py"), "mcp", "--autostart", "--name", "codex"],
                    check=True, capture_output=True)
     text = codex_config.read_text(encoding="utf-8")
     pattern = r"(?m)^\[mcp_servers\.board\]\r?$"
@@ -64,19 +64,21 @@ def main():
     if "board" in claude_data.get("mcpServers", {}):
         subprocess.run([claude, "mcp", "remove", "--scope", "user", "board"], check=True, capture_output=True)
     subprocess.run([claude, "mcp", "add", "--scope", "user", "--transport", "stdio", "board", "--",
-                    python, *args, "--name", "claude-code"], check=True, capture_output=True)
+                    python, *code_args, "--name", "claude-code"], check=True, capture_output=True)
     subprocess.run([codex, "mcp", "get", "board", "--json"], check=True, capture_output=True)
     installed = json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"]["board"]
-    if installed["command"] != python or installed["args"] != [*args, "--name", "claude-code"]:
+    if installed["command"] != python or installed["args"] != [*code_args, "--name", "claude-code"]:
         raise SystemExit("Claude registration verification failed")
     if desktop_config is not None and desktop_config.exists():
         desktop = json.loads(desktop_config.read_text(encoding="utf-8"))
-        desktop.setdefault("mcpServers", {})["board"] = {"command": python, "args": [*args, "--name", "claude-desktop"]}
+        # Desktop's Chat definition overrides the same name in local Code chats.
+        # Use the Code registration so native per-chat identity stays available.
+        desktop.get("mcpServers", {}).pop("board", None)
         temporary = desktop_config.with_name(desktop_config.name + ".board-install.tmp")
         temporary.write_text(json.dumps(desktop, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary, desktop_config)
     print("Installed board for Codex and user-level Claude Code (including Desktop local Code).")
-    operator_config = root / '.board/operator.json'
+    operator_config = workspace / '.codex/board-operator.json'
     operator_config.parent.mkdir(parents=True, exist_ok=True)
     operator_config.write_text(json.dumps({'workspace': str(workspace), 'database': str(database), 'port': options.port}, indent=2), encoding='utf-8')
 

@@ -47,8 +47,8 @@ def inherit(hub, db, p, agent, now):
         db.execute("UPDATE jobs SET state='CLAIMED',owner=?,lease_token=?,expires=?,updated=? WHERE id=?",
                    (agent, secrets.token_hex(16), now + 1800, now, row['id']))
     inbox = db.execute('UPDATE messages SET recipient=? WHERE recipient=? AND acknowledged IS NULL', (agent, target)).rowcount
-    db.execute("UPDATE agents SET state='retired',reason=?,disconnected=?,successor_id=?,inheritance_hash=NULL WHERE id=?",
-               ('Inherited by ' + agent + ': ' + reason, now, agent, target))
+    from .sessions import invalidate
+    invalidate(db, target, now, 'Inherited by ' + agent + ': ' + reason, agent)
     db.execute('UPDATE agents SET inherited_from=?,inherited_at=? WHERE id=?', (target, now, agent))
     hub.event(db, 'agent_inherited', agent, {'predecessor': target, 'reason': reason,
                                            'owner_override': override is not None, 'claim_ids': claims,

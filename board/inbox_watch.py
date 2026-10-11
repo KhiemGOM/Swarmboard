@@ -26,6 +26,9 @@ def watch_inbox(workspace, database, payload, seconds=3600, poll_seconds=2):
     agent = identity.get('agent_id')
     if not agent:
         return None
+    from .hooks import owns_inbox_binding
+    if not owns_inbox_binding(database, 'claude', key, agent):
+        return None
     lock = directory / (key + '.watch.lock')
     watermark = directory / (key + '.watch-delivery.json')
     deadline = time.time() + seconds
@@ -52,6 +55,8 @@ def watch_inbox(workspace, database, payload, seconds=3600, poll_seconds=2):
         while time.time() < deadline:
             # Replaced/retired identities must not keep waking this session.
             if json.loads(binding.read_text()).get('agent_id') != agent:
+                return None
+            if not owns_inbox_binding(database, 'claude', key, agent):
                 return None
             from .waits import poll
             poll(str(database), workspace)

@@ -65,6 +65,38 @@ The human may configure queue-only files in workspace .swarmboard.json using
 never edit the policy to bypass a refused claim. Existing holders can finish or
 relax. Read board_info for the current list. No automatic hot-file detection.
 
+For **file deletion**, acquire the appropriate file/folder claim before removing
+anything through an editor, patch or shell. Use the shared `board_file` function:
+`action=observe` with the exact path before deleting a child under a folder claim,
+then `action=deleted` with that path and a short reason after removal. This also
+applies when hooks are unavailable. The function verifies absence, releases only
+obsolete exact-file claims, preserves covering folder/queue protection, and records
+deletion history. It does not delete filesystem content or infer an author.
+Post-action hooks and normal hub calls also reconcile previously observed paths;
+missing files claimed for creation are kept locked. Use `action=reconcile` for
+immediate known-path checks and `action=history` with path/after_id/limit to inspect.
+Deletion remains unfinished work: resolve HELD custody with commit evidence.
+No background watcher or directory scanning is needed.
+
+For **desktop wake**, setup is automatic during /board join or refresh in Codex.
+There is no opt-in/out or separate permission question. Call board_desktop_wake
+status and, if auto_enable_required, register YOUR exact native chat ID from trusted
+app context with action=enable, workspace and reason. Never guess the chat ID or
+bind another live agent. include_existing=true includes pending inbox messages.
+
+The hub delivers new inbox arrivals through `codex queue --thread ID --message TEXT`.
+Its Python worker observes inbox IDs without model inference and submits one bounded
+wake per pending batch. Empty inboxes, ordinary status checks, noticeboard posts,
+and previously delivered but unacknowledged messages never trigger a wake.
+Long messages stay in the inbox and do not produce continuation wakes. The agent
+reads and acknowledges its own inbox after processing; queue acceptance is not an
+inbox acknowledgment. Ambiguous submissions remain UNCERTAIN and block automatic
+retry until inspected. Never create heartbeat automations, periodic model turns,
+or model-powered inbox relays. Do not manually relay pending batches while the
+hub worker owns delivery. Existing bindings follow workspace switches. Claude's
+asyncRewake watcher remains separate. A closed/unloaded Codex chat may retain a
+queued message until resumed; queue acceptance alone does not prove receipt.
+
 For **wake**, the terminal `./board.ps1 wake` checks access to an existing Codex
 control socket. Starting its optional watcher requires explicit human opt-in,
 the exact agent ID and `-ThreadId` from its native hook binding. See the checkout
@@ -73,6 +105,18 @@ enable the watcher automatically. Native Codex hooks still cannot wake idle chat
 
 For **version**, call board_info and report hub/bridge versions, mismatch if any,
 workspace and capabilities. Capability reporting does not verify native hooks.
+
+For **workspace ABSOLUTE_PROJECT_PATH**, use board_workspace with workspace and
+a reason to correct YOUR live MCP connection. Release active locks, finish/yield
+jobs and let submitted patch batches finish first. This affects only your MCP
+bridge; no global configuration is changed. Use the new ID/workspace returned by
+the tool instead of the cached startup ID. Read status, notices and inbox before
+claiming. Old custody and messages stay on the previous board; keep both private
+handoff keys for future inheritance. Harness cwd and installed hooks/watchers
+are not moved: configure target hooks separately before relying on them, and
+enabled desktop wake follows this same chat automatically. If not registered yet, follow the default wake registration above.
+If the tool is missing, reconnect
+MCP to refresh its schema; do not register a separate CLI identity as a workaround.
 
 For **inherit**, use the existing new session's MCP identity; never register a
 second identity or reuse the predecessor's session token. Confirm workspace with
@@ -99,8 +143,8 @@ For **wait**, explicitly subscribe with board_wait for a message acknowledgment,
 file/resource mutex becoming free, or batch finalization. This is opt-in; never
 subscribe automatically. Inbox delivery and replies already arrive automatically.
 Patch participants already receive one final batch message, so a completion wait
-does not add another. Claude uses its linked async watcher; Codex sees notifications
-on its next interaction. Availability notices do not reserve a resource.
+does not add another. Claude uses its linked async watcher; a registered Codex chat is queued only when
+the notification actually reaches its inbox. Availability notices do not reserve a resource.
 
 For **retire**, the command itself is the user's retirement authorization.
 Read board_status and confirm the workspace. With no ID, use your_agent_id;
@@ -121,7 +165,8 @@ do not continue editing the shared workspace as though joining succeeded.
 1. Call `board_status` and `noticeboard_read`. Confirm the reported workspace
    matches the directory being worked on. Use the hub's reported workspace;
    do not assume a particular repository. If it belongs to a different project,
-   report the mismatch and do not claim paths through that connection.
+   use board_workspace with the correct absolute project path and a reason,
+   then recheck status and notices. Do not claim through the mismatched connection.
 2. Read and follow `coordination_rules`; the SQLite noticeboard is the single
    board. Imported historical notices are context, not live authenticated locks.
    Check file/resource claims and unfinished custody in status.

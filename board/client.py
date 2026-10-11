@@ -5,12 +5,12 @@ from urllib.request import ProxyHandler, Request, build_opener
 from .core import BoardError
 
 
-def call(url, method, params):
+def call(url, method, params, timeout=10):
     request = Request(url.rstrip("/") + "/call", json.dumps({"method": method, "params": params}).encode(),
                       {"Content-Type": "application/json"})
     try:
         # Local coordination must never pass through an inherited corporate proxy.
-        with build_opener(ProxyHandler({})).open(request, timeout=10) as response:
+        with build_opener(ProxyHandler({})).open(request, timeout=timeout) as response:
             return json.load(response)
     except HTTPError as exc:
         try:

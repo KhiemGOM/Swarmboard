@@ -33,17 +33,47 @@ checkout, your shared workspace and persistent state. Both agents must use the
 same hub URL and database.
 
 ```sh
-claude mcp add --scope user --transport stdio board -- /absolute/path/to/python /absolute/path/to/swarmboard/run_board.py mcp --name claude-code --workspace /absolute/path/to/project --database /absolute/path/to/state/hub.sqlite --autostart
-codex mcp add board -- /absolute/path/to/python /absolute/path/to/swarmboard/run_board.py mcp --name codex --workspace /absolute/path/to/project --database /absolute/path/to/state/hub.sqlite --autostart
+claude mcp add --scope user --transport stdio board -- /absolute/path/to/python /absolute/path/to/swarmboard/run_board.py mcp --name claude-code --autostart
+codex mcp add board -- /absolute/path/to/python /absolute/path/to/swarmboard/run_board.py mcp --name codex --autostart
 ```
 
 `--autostart` starts the daemon on connection; `--workspace` verifies the hub's
 workspace before registration. Add `--url http://127.0.0.1:PORT` for another port.
-Bridges coordinate only that configured workspace. Automatic routing across
-repositories is not implemented. Reload connections after changing saved configs.
+Without `--workspace`, the bridge uses its launch working directory. Keep the
+shared Codex and Claude Code configurations free of workspace, database, URL and fixed `cwd`.
+It finds the nearest configured ancestor, preferring `.codex/board-operator.json`
+over `.board/operator.json` within that directory.
+A saved workspace or database mismatch is refused before registration. With no
+local selection, state is `.board/hub.sqlite` and the port is derived consistently
+from the workspace path. An occupied port belonging to another project is refused;
+configure a free port locally. Existing local selections preserve their database
+and port. Reload connections after changing saved configs.
+
+Switch the saved **Codex** board connection with one command:
+
+```powershell
+./board.ps1 configure -Workspace C:/project -Port 4318
+```
+
+Python equivalent: `python boardctl.py configure --workspace C:/project --port 4318`.
+Use `-Database` / `--database` to retain an existing board; otherwise the selected
+workspace gets `.board/hub.sqlite`. Choose a distinct port while another board
+is running. The command rejects a database or reachable hub belonging to another
+workspace, backs up the Codex and operator configurations, preserves unrelated
+MCP connections and board approval settings, and saves defaults in the selected project's `.codex/board-operator.json`.
+By default it writes that project's `.codex/config.toml`, leaving the shared global
+configuration alone. `-McpConfig` / `--mcp-config` explicitly overrides the target file.
+It does not register an agent or start a hub; MCP starts the hub after reconnecting.
+**Reload MCP or restart Codex, then run `$board`** to join the selected workspace.
+Existing chats retain their current connections until reloaded. Claude connections
+remain separately configured through the installer or `claude mcp add`.
 
 Example JSON/TOML configs live in `examples/`; replace their placeholders.
 Claude Desktop's local Code sessions share Claude Code's user registration.
+Do not also define `board` in `claude_desktop_config.json`: Desktop prefers that
+definition in local Code chats, bypassing the per-session Code connection.
+The installer removes that duplicate while preserving unrelated servers.
+Use Swarmboard in Desktop's Code tab; standalone Chat coordination is not supported.
 Its Developer MCP list uses a separate config: add the same command and args
 under `mcpServers` there to expose it in that list.
 
@@ -103,8 +133,25 @@ are in `examples/agent-instructions.md`.
 
 Takeover accepts an explicit declaration that a known predecessor is unavailable,
 retires its session and transfers live claims. Matching labels or inactivity
-alone do not prove identity or death. Reconnects register new IDs; old claims
-remain until expiry or takeover. Leases are not automatically renewed.
+alone do not prove identity or death. Native-bound reconnects reuse one ID per
+chat and workspace; startup registration replaces the previous connection token.
+Native hooks can authenticate reconnects when startup lacks a native session ID;
+the provisional ID is then permanently retired, without transferring its work.
+Without native environment context or installed session hooks, the bridge cannot
+identify the chat and cannot guarantee continuity. Leases are not automatically renewed.
+
+Codex startup uses only `CODEX_THREAD_ID`; a parent/session ID is never a fallback.
+Claude hook `session_id` binds its native conversation. The board's internal ID
+remains the reference for custody and inboxes; changing its display name never
+changes that ID. On connection the agent is prompted to choose a short readable
+name with `board_agent_name`, for example `Maple - UI`. Names persist on resume
+and must be distinguishable among active agents in the workspace.
+
+Both installed harness configurations include `SessionEnd`. Normal native exit
+marks the agent disconnected and reopens unfinished jobs, preserving custody and
+file leases for recovery. A late hook with an obsolete connection token cannot
+disconnect a resumed chat. MCP EOF is an additional disconnect fallback; abrupt
+process termination may skip both, so session end is not proof of permanent death.
 
 ## Job board
 
@@ -169,7 +216,11 @@ The successor keeps its fresh ID and calls `inherit` with `target_agent_id`,
 Inheritance atomically transfers live file/resource mutexes with their existing
 expiry, unfinished custody, unfinished owned/recovery jobs with new lease tokens,
 and unread inbox messages. It invalidates the predecessor and consumes its key.
-Late messages addressed to predecessor IDs follow the successor chain. Completed
+Messages addressed to retired or disconnected agents are rejected without being
+inserted or waking a chat. An inherited predecessor's error names its successor;
+the sender must explicitly address that ID. Retirement disables the old wake
+binding and retains the native chat binding as a tombstone against automatic
+replacement registration. Completed
 history remains attributed to the original agent. Expired/released mutexes are
 not revived, and jobs/custody already adopted by others are not taken back.
 
@@ -364,8 +415,32 @@ from acknowledgement. It stops when the bound identity retires, disconnects, or
 changes. The next Stop arms another watcher. After an hour of uninterrupted idle
 time, tool/prompt checks remain the fallback until a new Stop rearms it. This
 requires a Claude Code version supporting `asyncRewake` and a live interactive
-session; a closed process cannot be woken. Codex uses tool/prompt checks and MCP
-previews; this integration does not install an idle wake mechanism for Codex.
+session; a closed process cannot be woken. Codex uses the inbox-only queue delivery
+below, with tool/prompt checks and MCP previews as fallbacks.
+
+### Inbox-only Codex desktop wake
+
+Codex hooks automatically register desktop wake when they link an exclusive
+native chat identity, and restore missing bindings on subsequent activity.
+No manual enable step is required with working native hooks. Without hooks,
+`board_desktop_wake action=enable` requires your verified native chat ID and workspace. The hub's small
+Python worker observes new inbox IDs and calls `codex queue` once per pending
+batch. It invokes no model while waiting. Never install a heartbeat schedule or
+periodic model check for this feature.
+
+Only new durable inbox messages cause a queue submission. Status reads, notices,
+lock scans, startup with no new messages, and unacknowledged messages already
+queued do not cause repeated wakes. Long bodies stay in the inbox; a bounded wake
+asks the recipient to read them. No extra chunk or follow-up wake is scheduled.
+Existing bindings follow workspace switching, and Claude asyncRewake stays separate.
+
+The existing durable reservation/cursor protects concurrent dispatch and hub
+restarts. Queue success records submission, never recipient acknowledgment.
+Timeout, failure, or an interrupted reservation becomes UNCERTAIN and blocks
+automatic retry until inspected. `board_desktop_wake action=status` reports the
+last delivery state. Acceptance is not proof of receipt: unloaded chats can
+remain queued until resumed. Codex must be installed on the hub host and have
+access to the same Codex home as the bound desktop chat.
 
 ### Optional Codex wake adapter
 
@@ -520,3 +595,51 @@ no Markdown mirror.
 
 Planned: owner-authorized bypass, quota detection, configurable evidence validation
 and optional push adapters.
+
+
+## Deleted files
+
+Call the **`board_cleanup` MCP tool** with no arguments for manual cleanup in the
+connected workspace. It returns deletion and released-lock counts and preserves
+unfinished custody/history. The terminal `cleanup` command also remains available.
+
+The shared `board_file` cleanup function verifies that a recorded file is missing,
+releases its obsolete exact-file claims, marks active custody HELD and keeps a
+per-file deletion history. Folder protection, patch queues and commit evidence
+remain intact. It never deletes filesystem content or assumes who removed it.
+
+Post-action hooks invoke reconciliation after shell/edit tools. Normal hub
+interactions use the same function, so deletions outside hooks are reconciled on
+the next board call. Only known paths are checked; there is no directory walk or
+background watcher. A missing file claimed for creation stays protected until it
+has actually been observed present. A recreated file can acquire a fresh claim.
+
+After deleting through any tool, explicitly use `board_file action=deleted` with
+`path` and a short `reason` for immediate cleanup, or `action=reconcile` for known
+paths. Use `action=history`, `path`, `after_id` and `limit` (at most 10) to inspect
+records. Deletion is unfinished work: resolve HELD custody with commit evidence;
+cleanup does not imply a commit. A claim released by deletion may be finalized
+with the usual `release` while its custody remains yours and no new claim exists.
+
+
+Run manual deletion cleanup from the project directory:
+
+```powershell
+./board.ps1 cleanup
+```
+
+Or select a project explicitly with `./board.ps1 cleanup -Workspace C:/project`.
+The portable equivalent is `python /path/to/swarmboard/boardctl.py cleanup`.
+It uses the selected directory's saved board connection, reports deleted paths
+and released lock counts, preserves custody/history, and requires an existing
+board database. It works without MCP or hooks and registers no new agent.
+
+
+Global hook commands are workspace-neutral. They read the native hook payload's
+absolute `cwd` and resolve that project's local board selection (or its nearest
+configured parent when running from a subfolder). They never use the Swarmboard
+checkout as a project default. Unconfigured projects are ignored without creating
+a database or agent. `python install_hooks.py` installs automatic hooks for both
+harnesses; optional `--workspace/--database/--url` save the selection in that
+project's `.codex/board-operator.json`, never in the global hook command. Legacy
+explicitly scoped hook invocations remain supported.

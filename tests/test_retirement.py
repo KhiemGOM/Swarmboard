@@ -94,7 +94,7 @@ class RetirementTests(unittest.TestCase):
                     {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {'name': 'board_status', 'arguments': {}}}]
         try:
             result = subprocess.run([sys.executable, str(entry), 'mcp', '--url', f'http://127.0.0.1:{server.server_port}', '--name', 'retire-probe'],
-                                    input=''.join(json.dumps(r)+'\n' for r in requests), capture_output=True, text=True, check=True, timeout=15)
+                                    input=''.join(json.dumps(r)+'\n' for r in requests), capture_output=True, text=True, check=True, timeout=15, cwd=self.root)
             replies = [json.loads(line) for line in result.stdout.splitlines()]
             self.assertFalse(replies[1]['result']['isError'])
             retired = json.loads(replies[1]['result']['content'][0]['text'])

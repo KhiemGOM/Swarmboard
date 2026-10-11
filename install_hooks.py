@@ -73,15 +73,30 @@ def install(path, command, arguments=None, watch=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--workspace', required=True)
-    parser.add_argument('--database', required=True)
-    parser.add_argument('--url', default='http://127.0.0.1:4317')
+    parser.add_argument('--workspace', help='Save board selection locally; global hook routing stays automatic')
+    parser.add_argument('--database')
+    parser.add_argument('--url')
     parser.add_argument('--codex-config', type=Path, default=Path.home() / '.codex/hooks.json')
     parser.add_argument('--claude-config', type=Path, default=Path.home() / '.claude/settings.json')
     args = parser.parse_args()
+    if (args.database or args.url) and not args.workspace:
+        parser.error('--database/--url require --workspace for a project-local selection')
+    if args.workspace:
+        from board.runtime import workspace_connection
+        from board.configure import atomic_write
+        from urllib.parse import urlparse
+        workspace, database, url = workspace_connection(args.workspace, args.database, args.url)
+        address = urlparse(url)
+        if address.scheme != 'http' or address.hostname != '127.0.0.1' or not address.port or address.path not in ('', '/'):
+            parser.error('Hook routing requires http://127.0.0.1:PORT')
+        local = Path(workspace) / '.codex/board-operator.json'
+        saved = json.loads(local.read_text(encoding='utf-8')) if local.exists() else {}
+        if local.exists():
+            shutil.copy2(local, local.with_name(local.name + '.swarmboard-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.bak'))
+        saved.update(workspace=workspace, database=database, port=address.port)
+        atomic_write(local, json.dumps(saved, indent=2) + '\n')
     for harness, config in [('codex', args.codex_config), ('claude', args.claude_config)]:
-        argv = [sys.executable, str(Path(__file__).resolve().with_name('swarmboard_hook.py')), '--harness', harness,
-                '--workspace', str(Path(args.workspace).resolve()), '--database', str(Path(args.database).resolve()), '--url', args.url]
+        argv = [sys.executable, str(Path(__file__).resolve().with_name('swarmboard_hook.py')), '--harness', harness]
         command = shell_command(argv, windows=sys.platform == 'win32')
         install(config, argv[0] if harness == 'claude' else command, argv[1:] if harness == 'claude' else None, watch=harness == 'claude')
         print(f'Installed {harness} Swarmboard hooks: {config}')

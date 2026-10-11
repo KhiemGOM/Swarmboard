@@ -44,7 +44,9 @@ class InheritanceTests(unittest.TestCase):
         self.assertEqual(status['agents'][0]['inherited_from'], self.old['agent_id'])
         with self.assertRaisesRegex(BoardError, 'retired'):
             self.call(self.old, 'board_status')
-        self.call(self.peer, 'inbox_send', recipient_agent_id=self.old['agent_id'], body='Late reply')
+        with self.assertRaisesRegex(BoardError, 'Recipient is retired'):
+            self.call(self.peer, 'inbox_send', recipient_agent_id=self.old['agent_id'], body='Late reply')
+        self.call(self.peer, 'inbox_send', recipient_agent_id=self.new['agent_id'], body='Explicit successor reply')
         self.assertEqual(self.call(self.new, 'inbox_read')['unread_inbox'], 2)
         with self.assertRaisesRegex(BoardError, 'already inherited'):
             self.inherit(inheritance_secret=self.old['inheritance_secret'])

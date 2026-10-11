@@ -8,3 +8,7 @@ __pycache__/
 *.sqlite-shm
 *.sqlite-wal
 *.board-backup-*
+
+# Machine-local Codex MCP routing
+.codex/
+.codex-remote-attachments/

@@ -11,10 +11,11 @@ from board.runtime import ensure_hub
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', nargs='?', choices=['start', 'status', 'mutex', 'jobs', 'retire', 'wake'], default='start')
+    parser.add_argument('command', nargs='?', choices=['start', 'status', 'mutex', 'jobs', 'retire', 'wake', 'configure', 'cleanup'], default='start')
     parser.add_argument('agent_id', nargs='?', help='Exact agent ID for retire; terminal cannot infer a chat identity')
     parser.add_argument('--reason', default='Owner declared this agent unavailable')
     parser.add_argument('--workspace')
+    parser.add_argument('--mcp-config', type=Path, help='Codex config.toml path for configure')
     parser.add_argument('--database')
     parser.add_argument('--port', type=int)
     parser.add_argument('--thread-id')
@@ -22,9 +23,35 @@ def main():
     parser.add_argument('--codex', default='codex')
     parser.add_argument('--once', action='store_true')
     parser.add_argument('--include-existing', action='store_true')
-    parser.add_argument('--config', type=Path, default=Path(__file__).resolve().parent / '.board/operator.json')
+    parser.add_argument('--config', type=Path, default=None)
     args = parser.parse_args()
     try:
+        if args.command == 'cleanup':
+            if args.agent_id:
+                raise BoardError('cleanup does not accept an agent ID')
+            if args.config:
+                raise BoardError('cleanup uses workspace-local routing; use --workspace or --database')
+            from board.runtime import workspace_connection
+            from board.file_lifecycle import cleanup_local
+            workspace, database, _ = workspace_connection(args.workspace, args.database)
+            database = Path(database)
+            if not database.is_file():
+                raise BoardError('State database does not exist; cleanup will not create a board')
+            print(json.dumps(cleanup_local(Hub(database, workspace)), indent=2))
+            return
+        if args.command == 'configure':
+            if not args.workspace:
+                raise BoardError('configure requires --workspace')
+            if args.agent_id:
+                raise BoardError('configure does not accept an agent ID')
+            from board.configure import configure
+            workspace = Path(args.workspace).resolve()
+            database = Path(args.database).resolve() if args.database else workspace / '.board/hub.sqlite'
+            print(json.dumps(configure(workspace, database, args.port if args.port is not None else 4317,
+                                       args.config or workspace / '.codex/board-operator.json',
+                                       Path(__file__).resolve().parent, args.mcp_config), indent=2))
+            return
+        args.config = args.config or Path(__file__).resolve().parent / '.board/operator.json'
         saved = json.loads(args.config.read_text()) if args.config.exists() else {}
         # Explicit workspace selects its own state; never silently reuse another project's DB.
         workspace = Path(args.workspace or saved.get('workspace') or Path.cwd()).resolve()

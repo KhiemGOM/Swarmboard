@@ -1,4 +1,6 @@
 import json
+import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -71,11 +73,18 @@ class InboxWatchTests(unittest.TestCase):
         self.send()
         self.hub.call('disconnect', {**self.recipient, 'reason': 'Session closed'})
         self.assertIsNone(self.watch())
+
         self.hub.call('board_status', self.recipient)
         self.hub.call('retire', {**self.sender, 'target_agent_id': self.recipient['agent_id'], 'reason': 'Owner requested retirement'})
         self.assertIsNone(self.watch())
         for path in (self.root / 'hook-sessions').glob('*.json'):
             path.unlink()
+        self.assertIsNone(self.watch())
+
+    def test_retired_legacy_state_without_binding_exits_quietly(self):
+        self.hub.call('retire', {**self.sender,'target_agent_id':self.recipient['agent_id'],'reason':'retired provisional'})
+        with self.hub.connect() as db:
+            db.execute('DELETE FROM hook_inbox_bindings')
         self.assertIsNone(self.watch())
 
     def test_installer_adds_claude_async_rewake_and_preserves_other_handlers(self):
@@ -99,3 +108,47 @@ class InboxWatchTests(unittest.TestCase):
         repeated = subprocess.run(command, input=json.dumps(self.payload), text=True, capture_output=True, timeout=5)
         self.assertEqual(repeated.returncode, 0, repeated.stderr)
         self.assertEqual(repeated.stdout, '')
+
+    def test_three_claude_sessions_only_addressed_inbox_wakes(self):
+        recipients = [self.recipient]
+        payloads = [self.payload]
+        adapter = Adapter(self.root, self.database, 'claude', caller=lambda url, method, params: self.hub.call(method, params))
+        for index in range(2):
+            agent = self.hub.call('register', {'name': 'Recipient'})
+            payload = {**self.payload, 'session_id': f'other-{index}'}
+            adapter.handle({**payload, 'hook_event_name': 'PostToolUse', 'tool_name': 'mcp__board__board_status',
+                            'tool_response': {'your_agent_id': agent['agent_id']}})
+            recipients.append(agent); payloads.append(payload)
+        self.hub.call('inbox_send', {**self.sender, 'recipient_agent_id': recipients[1]['agent_id'], 'body': 'Only second chat'})
+        wakes = [watch_inbox(self.root, self.database, payload, seconds=.04, poll_seconds=.005) for payload in payloads]
+        self.assertIsNone(wakes[0]); self.assertIn('Only second chat', wakes[1]); self.assertIsNone(wakes[2])
+        self.assertTrue(all(watch_inbox(self.root, self.database, p, seconds=.02, poll_seconds=.005) is None for p in payloads))
+
+    def test_legacy_three_sessions_same_agent_migrate_to_one_owner(self):
+        import sqlite3
+        with sqlite3.connect(self.database) as db:
+            db.execute('DELETE FROM hook_inbox_bindings')
+            db.execute('DELETE FROM native_sessions')
+        payloads = [{**self.payload, 'session_id': f'legacy-{i}'} for i in range(3)]
+        # Remove the setup binding so only these three legacy sessions compete.
+        for path in (self.root/'hook-sessions').glob('*.json'):
+            path.unlink()
+        for i, payload in enumerate(payloads):
+            key = hashlib.sha256(('claude:' + payload['session_id']).encode()).hexdigest()
+            path = self.root/'hook-sessions'/f'{key}.json'
+            path.write_text(json.dumps({'agent_id': self.recipient['agent_id'], 'session_token': self.recipient['session_token']}))
+            os.utime(path, (100+i, 100+i))
+        self.send('Legacy direct message')
+        wakes = [watch_inbox(self.root, self.database, p, seconds=.04, poll_seconds=.005) for p in payloads]
+        self.assertIsNone(wakes[0]); self.assertIsNone(wakes[1]); self.assertIn('Legacy direct message', wakes[2])
+
+    def test_duplicate_hook_cannot_read_or_disconnect_owner_inbox(self):
+        adapter = Adapter(self.root, self.database, 'claude', caller=lambda url, method, params: self.hub.call(method, params))
+        duplicate = {**self.payload, 'session_id': 'duplicate-chat'}
+        result = adapter.handle({**duplicate, 'hook_event_name': 'PostToolUse', 'tool_name': 'mcp__board__board_status',
+                                 'tool_response': {'your_agent_id': self.recipient['agent_id']}})
+        self.assertIn('refused a shared inbox binding', str(result))
+        self.send('Owner only')
+        self.assertIsNone(watch_inbox(self.root, self.database, duplicate, seconds=.04, poll_seconds=.005))
+        adapter.handle({**duplicate, 'hook_event_name': 'SessionEnd'})
+        self.assertIn('Owner only', self.watch())

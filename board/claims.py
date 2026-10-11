@@ -106,8 +106,17 @@ def dispatch(hub, db, method, p, agent, now):
         rows = []
         for claim_id in dict.fromkeys(ids):
             row = db.execute("SELECT * FROM claims WHERE id=?", (claim_id,)).fetchone()
-            if not row or row["agent"] != agent or not row["active"]:
+            if not row or row["agent"] != agent:
                 raise BoardError("Can only release your own active claims")
+            if not row['active']:
+                # Finish the deletion's custody without releasing a new claim.
+                has_table = db.execute("SELECT 1 FROM sqlite_master WHERE name='file_deletions'").fetchone()
+                deleted_claim = has_table and any(row['id'] in json.loads(record[0]) for record in db.execute(
+                    'SELECT released_claims FROM file_deletions WHERE path=? AND owner=?', (row['path'], agent)))
+                custodian = db.execute('SELECT owner,state FROM custody WHERE path=?', (row['path'],)).fetchone()
+                newer = db.execute("SELECT 1 FROM claims WHERE active=1 AND kind='file' AND path=?", (row['path'],)).fetchone()
+                if not deleted_claim or not custodian or custodian['owner'] != agent or custodian['state'] != 'HELD' or newer:
+                    raise BoardError("Can only release your own active claims or finish your deleted file's HELD custody")
             rows.append(row)
         sha, held = p.get("commit_hash"), p.get("held_reason")
         if sha is not None and held is not None:

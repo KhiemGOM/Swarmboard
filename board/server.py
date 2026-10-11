@@ -60,12 +60,16 @@ def main():
     workspace = Path(args.workspace).resolve()
     hub = Hub(args.database or workspace / ".board" / "hub.sqlite", workspace)
     server = serve(hub, args.port)
+    from .desktop_wake import QueueWorker
+    worker = QueueWorker(hub)
+    worker.start()
     print(f"Agent Board listening on http://127.0.0.1:{server.server_port}; workspace={workspace}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        worker.stop()
         server.server_close()
 
 
