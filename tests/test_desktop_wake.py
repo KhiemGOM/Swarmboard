@@ -25,7 +25,12 @@ class DesktopWakeTests(unittest.TestCase):
         return self.call(who,'board_desktop_wake',action=action,**args)
 
     def enable(self,who=None,**args):
-        return self.wake(who or self.a,'enable',thread_id=args.pop('thread_id','exact-chat'),workspace=str(self.root),owner_authorization='OWNER_REQUESTED_DESKTOP_WAKE',reason='Human requested desktop wake',**args)
+        who = who or self.a
+        result = self.wake(who,'enable',thread_id=args.pop('thread_id','exact-chat'),workspace=str(self.root),owner_authorization='OWNER_REQUESTED_DESKTOP_WAKE',reason='Human requested desktop wake',**args)
+        # Simulate an idle hook in this isolated test board.
+        with self.hub.connect() as db:
+            db.execute("UPDATE desktop_wake_bindings SET activity='idle' WHERE agent=?", (who['agent_id'],))
+        return result
 
     def send(self,body='The actual peer message is delivered verbatim'):
         return self.call(self.b,'inbox_send',recipient_agent_id=self.a['agent_id'],body=body)['id']
@@ -143,6 +148,9 @@ class DesktopWakeTests(unittest.TestCase):
         self.hub = Hub(self.root/'hub.sqlite', self.root)
         self.assertFalse(self.wake(self.a, 'status')['auto_enable_required'])
         self.send()
+        self.assertEqual(len(self.pending()), 0)  # Native activity not yet known.
+        with self.hub.connect() as db:
+            db.execute("UPDATE desktop_wake_bindings SET activity='idle' WHERE agent=?", (self.a['agent_id'],))
         self.assertEqual(len(self.pending()), 1)
 
     def test_old_optout_settings_do_not_disable_service(self):
@@ -236,6 +244,122 @@ class DesktopWakeTests(unittest.TestCase):
             QueueWorker.submit('exact-chat', 'Quotes " and $(shell) are data')
             self.assertEqual(run.call_args.args[0], ['codex.exe', 'queue', '--thread', 'exact-chat', '--message', 'Quotes " and $(shell) are data'])
             self.assertFalse(run.call_args.kwargs['shell'])
+
+    def test_busy_agent_gets_no_queue_and_acknowledged_message_never_wakes(self):
+        self.enable()
+        with self.hub.connect() as db:
+            db.execute("UPDATE desktop_wake_bindings SET activity='busy' WHERE agent=?", (self.a['agent_id'],))
+        message = self.send()
+        worker = self.worker()
+        self.assertEqual(worker.once(), 0)
+        self.assertEqual(self.submissions, [])
+        self.call(self.a, 'inbox_read')
+        self.call(self.a, 'inbox_ack', message_ids=[message])
+        with self.hub.connect() as db:
+            db.execute("UPDATE desktop_wake_bindings SET activity='idle' WHERE agent=?", (self.a['agent_id'],))
+        self.assertEqual(worker.once(), 0)
+
+    def test_unread_busy_message_wakes_once_after_stop(self):
+        self.enable()
+        with self.hub.connect() as db:
+            db.execute("UPDATE desktop_wake_bindings SET activity='busy' WHERE agent=?", (self.a['agent_id'],))
+        self.send()
+        worker = self.worker()
+        self.assertEqual(worker.once(), 0)
+        with self.hub.connect() as db:
+            db.execute("UPDATE desktop_wake_bindings SET activity='idle' WHERE agent=?", (self.a['agent_id'],))
+        self.assertEqual(worker.once(), 1)
+        self.assertEqual(worker.once(), 0)
+
+    def test_unknown_activity_defers_queue_and_reenable_preserves_busy(self):
+        self.wake(self.a, 'enable', thread_id='exact-chat', workspace=str(self.root), reason='bind')
+        self.send()
+        worker = self.worker()
+        self.assertEqual(worker.once(), 0)
+        with self.hub.connect() as db:
+            db.execute("UPDATE desktop_wake_bindings SET activity='busy' WHERE agent=?", (self.a['agent_id'],))
+        self.wake(self.a, 'enable', thread_id='exact-chat', workspace=str(self.root), reason='refresh')
+        self.assertEqual(self.wake(self.a, 'status')['activity'], 'busy')
+        self.assertEqual(worker.once(), 0)
+
+    def test_busy_before_submission_cancels_reservation_without_losing_message(self):
+        from board.desktop_wake import ready
+        self.enable()
+        self.send()
+        worker = self.worker()
+        def become_busy(db, *args, **kwargs):
+            rows = ready(db, *args, **kwargs)
+            db.execute("UPDATE desktop_wake_bindings SET activity='busy' WHERE agent=?", (self.a['agent_id'],))
+            return rows
+        with patch('board.desktop_wake.ready', side_effect=become_busy):
+            worker.once()
+        self.assertEqual(self.submissions, [])
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT cursor FROM desktop_wake_bindings WHERE agent=?', (self.a['agent_id'],)).fetchone()[0], 0)
+            db.execute("UPDATE desktop_wake_bindings SET activity='idle' WHERE agent=?", (self.a['agent_id'],))
+        self.assertEqual(worker.once(), 1)
+        self.assertEqual(worker.once(), 0)
+
+    def test_worker_wakes_for_mutex_expiry_without_an_agent_call(self):
+        self.enable()
+        claim = self.call(self.b, 'mutex_claim', resources=['db:idle'], reason='busy')
+        self.call(self.a, 'board_wait', action='subscribe', kind='mutex_free', resource='db:idle')
+        worker = self.worker()
+        with self.hub.connect() as db:
+            db.execute('UPDATE claims SET expires=0 WHERE id=?', (claim['claim_ids'][0],))
+        self.assertEqual(worker.once(), 1)
+        self.assertEqual(worker.once(), 0)
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM board_waits WHERE agent=?", (self.a['agent_id'],)).fetchone()[0], 'FIRED')
+            self.assertIn('mutex_free', db.execute('SELECT body FROM messages WHERE recipient=?', (self.a['agent_id'],)).fetchone()[0])
+
+    def test_worker_wakes_for_timeout_without_an_agent_call(self):
+        self.enable()
+        self.call(self.b, 'mutex_claim', resources=['db:busy'], reason='busy')
+        wait = self.call(self.a, 'board_wait', action='subscribe', kind='mutex_free', resource='db:busy')['wait']
+        with self.hub.connect() as db:
+            db.execute('UPDATE board_waits SET expires=0 WHERE id=?', (wait['id'],))
+        worker = self.worker()
+        self.assertEqual(worker.once(), 1)
+        self.assertEqual(worker.once(), 0)
+
+    def test_worker_reconciles_deletion_without_hook_or_agent_call(self):
+        self.enable()
+        path = self.root / 'gone.py'
+        path.write_text('work', encoding='utf-8')
+        claim = self.call(self.a, 'claim', paths=['gone.py'], reason='work')
+        worker = self.worker()
+        path.unlink()
+        self.assertEqual(worker.once(), 1)
+        self.assertEqual(worker.once(), 0)
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT active FROM claims WHERE id=?', (claim['claim_ids'][0],)).fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT state FROM custody WHERE path=?', ('gone.py',)).fetchone()[0], 'HELD')
+
+    def test_worker_expires_jobs_and_wakes_owner_once(self):
+        self.enable()
+        job = self.call(self.a, 'job_post', title='Idle job', description='Work', acceptance='Done')['job']
+        self.call(self.a, 'job_claim', job_id=job['id'])
+        with self.hub.connect() as db:
+            db.execute('UPDATE jobs SET expires=0 WHERE id=?', (job['id'],))
+        worker = self.worker()
+        self.assertEqual(worker.once(), 1)
+        self.assertEqual(worker.once(), 0)
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (job['id'],)).fetchone()[0], 'OPEN')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM messages WHERE recipient=?', (self.a['agent_id'],)).fetchone()[0], 1)
+
+    def test_worker_observes_queue_interference_without_an_agent_call(self):
+        self.enable()
+        path = self.root / 'queued.py'
+        path.write_text('base\n', encoding='utf-8')
+        self.call(self.a, 'patch_queue', action='join', path='queued.py', reason='shared')
+        worker = self.worker()
+        path.write_text('outside change\n', encoding='utf-8')
+        self.assertEqual(worker.once(), 1)
+        self.assertEqual(worker.once(), 0)
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM coordination_incidents').fetchone()[0], 1)
 
     def test_three_same_harness_chats_queue_only_exact_recipient(self):
         self.enable(thread_id='chat-one')

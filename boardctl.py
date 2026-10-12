@@ -11,7 +11,7 @@ from board.runtime import ensure_hub
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', nargs='?', choices=['start', 'status', 'mutex', 'jobs', 'retire', 'wake', 'configure', 'cleanup'], default='start')
+    parser.add_argument('command', nargs='?', choices=['start', 'status', 'release', 'mutex', 'jobs', 'retire', 'wake', 'configure', 'cleanup'], default='start')
     parser.add_argument('agent_id', nargs='?', help='Exact agent ID for retire; terminal cannot infer a chat identity')
     parser.add_argument('--reason', default='Owner declared this agent unavailable')
     parser.add_argument('--workspace')
@@ -80,11 +80,15 @@ def main():
                     raise BoardError('agent_id is only accepted with retire')
                 if args.command == 'jobs':
                     query = 'SELECT id,title,state,owner,previous_owner,expires,progress,summary,commit_hash FROM jobs ORDER BY id'
-                elif args.command == 'mutex':
+                elif args.command in ('release', 'mutex'):
                     query = 'SELECT id,agent,path,kind,reason,expires FROM claims WHERE active=1 ORDER BY id'
                 else:
                     query = 'SELECT id,name,state,seen,reason FROM agents ORDER BY started'
-                print(json.dumps({'workspace': str(workspace), args.command: [dict(r) for r in db.execute(query)]}, indent=2))
+                result = {'workspace': str(workspace), args.command: [dict(r) for r in db.execute(query)]}
+                if args.command in ('release', 'mutex'):
+                    result['patch_queues'] = [dict(r) for r in db.execute(
+                        "SELECT b.id AS batch_id,b.path,b.state,m.agent FROM patch_batches b JOIN patch_members m ON m.batch_id=b.id WHERE m.state='ACTIVE' AND b.state IN ('OPEN','READY','APPLYING') ORDER BY b.id,m.agent")]
+                print(json.dumps(result, indent=2))
                 return
         print(json.dumps(Hub(database, workspace).retire_local(args.agent_id, args.reason), indent=2))
     except (BoardError, OSError, ValueError, sqlite3.Error) as exc:

@@ -60,6 +60,7 @@ class HookTests(unittest.TestCase):
         status = self.call('board_desktop_wake', action='status')
         self.assertTrue(status['enabled'])
         self.assertEqual(status['thread_id'], 'native-session')
+        self.assertEqual(status['activity'], 'busy')
         with self.hub.connect() as db:
             db.execute('DELETE FROM desktop_wake_bindings')
         self.event('UserPromptSubmit')
@@ -68,6 +69,20 @@ class HookTests(unittest.TestCase):
         with self.hub.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM desktop_wake_bindings').fetchone()[0], 1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM desktop_wake_deliveries').fetchone()[0], 0)
+
+    def test_codex_activity_follows_turn_hooks_and_never_acknowledges(self):
+        self.adapter.harness = 'codex'
+        self.bind()
+        peer = self.hub.call('register', {'name': 'sender'})
+        self.hub.call('inbox_send', {**peer, 'recipient_agent_id': self.agent['agent_id'], 'body': 'pending'})
+        for event in ('PreToolUse', 'PostToolUse', 'UserPromptSubmit'):
+            self.event(event, tool_name='Read')
+            self.assertEqual(self.call('board_desktop_wake', action='status')['activity'], 'busy')
+        self.event('Stop')
+        self.assertEqual(self.call('board_desktop_wake', action='status')['activity'], 'idle')
+        self.assertEqual(len(self.call('inbox_read')['messages']), 1)
+        self.event('UserPromptSubmit')
+        self.assertEqual(self.call('board_desktop_wake', action='status')['activity'], 'busy')
 
     def test_claude_hook_link_does_not_register_codex_wake(self):
         self.bind()
@@ -190,6 +205,24 @@ class HookTests(unittest.TestCase):
             self.assertEqual(len(requests), 1)
             self.assertEqual(requests[0]['after_id'], last_id)
 
+    def test_large_status_does_not_block_claimed_edit_or_allow_unclaimed_edit(self):
+        self.bind()
+        path = self.root / 'a.py'
+        self.call('claim', paths=[str(path)], reason='edit')
+        job = self.call('job_post', title='Large job', description='description', acceptance='done')['job']
+        owned = self.call('job_claim', job_id=job['id'])['job']
+        self.call('job_update', job_id=job['id'], lease_token=owned['lease_token'], progress='x' * 15000)
+        with self.hub.connect() as db:
+            for i in range(30):
+                db.execute("INSERT INTO custody VALUES (?,?,'HELD',?,NULL,0)", (f'old{i}.py', self.agent['agent_id'], 'y' * 1000))
+        with self.assertRaisesRegex(BoardError, 'RESPONSE_TOO_LARGE'):
+            self.call('board_status', target_agent_id='self', include_rules=False)
+        allowed = self.event('PreToolUse', tool_name='Edit', tool_input={'file_path':str(path)})
+        self.assertNotEqual(allowed.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
+        denied = self.event('PreToolUse', tool_name='Edit', tool_input={'file_path':str(self.root/'unclaimed.py')})
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.event('Stop')
+
     def test_post_action_deletion_cleanup_uses_shared_function(self):
         self.bind()
         path = self.root / 'a.py'
@@ -211,14 +244,14 @@ class HookTests(unittest.TestCase):
     def test_hooks_request_focused_status(self):
         requests = []
         def caller(url, method, params):
-            if method == 'board_status':
+            if method == 'hook_status':
                 requests.append(params)
             return self.hub.call(method, params)
         self.adapter.caller = caller
         self.bind()
         self.event('Stop')
         self.assertEqual(len(requests), 2)
-        self.assertTrue(all(p['target_agent_id'] == 'self' and p['include_rules'] is False for p in requests))
+        self.assertTrue(all(p['paths'] == [] and p['resources'] == [] for p in requests))
 
     def test_inbox_injected_after_ordinary_tools_and_on_next_prompt_without_ack(self):
         self.bind()
@@ -261,7 +294,7 @@ class HookTests(unittest.TestCase):
         claim = self.call('mutex_claim', resources=['port:3519'], reason='Preview still running')
         before = self.call('board_status')['claims']
         warning = self.event('Stop')['systemMessage']
-        self.assertIn('/board mutex', warning)
+        self.assertIn('/board release', warning)
         self.assertEqual(self.call('board_status')['claims'], before)
         self.call('release', claim_ids=claim['claim_ids'], reason='Preview stopped')
         self.assertEqual(self.event('Stop'), {})

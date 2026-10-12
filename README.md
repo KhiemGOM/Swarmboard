@@ -219,8 +219,12 @@ and unread inbox messages. It invalidates the predecessor and consumes its key.
 Messages addressed to retired or disconnected agents are rejected without being
 inserted or waking a chat. An inherited predecessor's error names its successor;
 the sender must explicitly address that ID. Retirement disables the old wake
-binding and retains the native chat binding as a tombstone against automatic
-replacement registration. Completed
+binding and retains native ownership so the same chat can reconnect with the
+same ID. Reconnection rotates credentials and restores access, without restoring
+released locks, queue membership, waits or reopened job ownership. After a handoff,
+the original native chat may also rejoin with its ID, without taking back work
+already transferred to the successor. Old credentials remain invalid; handoff
+history is retained in the resume event. Completed
 history remains attributed to the original agent. Expired/released mutexes are
 not revived, and jobs/custody already adopted by others are not taken back.
 
@@ -330,11 +334,13 @@ Ack means processed, not answered or agreed. There is no reply subscription:
 inbox delivery is already automatic. Participant completion subscriptions reuse
 the mandatory final batch notification instead of sending a duplicate.
 
-Conditions are evaluated on hub calls and by the existing Claude Stop watcher,
-including resource/file lease expiration while idle. No extra hook definition
-is needed. The existing bounded watcher must be linked and running; it expires
-after one hour and is rearmed on the next Stop. Codex still requires a new user
-interaction. A free-lock notice is a snapshot and does not reserve the lock.
+Conditions are evaluated on hub calls, by the Claude Stop watcher, and by the
+Codex hub event worker while idle. Codex covers wait readiness/timeouts, file and
+resource lease expiry, job lease expiry, tracked-file deletion, patch finalization
+and queue interference. Resulting system inbox messages use the same deduplicated
+wake delivery as peer messages. No extra hook definition is needed. Claude's
+bounded watcher expires after one hour and rearms on the next Stop; the Codex
+worker runs with the hub. A free-lock notice is a snapshot, not a reservation.
 
 HELD file custody older than two hours includes an age warning and a nudge to
 commit smaller coherent pieces. Reclaim/release/retirement/inheritance preserve
@@ -344,6 +350,19 @@ older history cannot be reconstructed. Recorded commit evidence ends that debt.
 ### Focused queries
 
 `board_status` supports focused MCP queries:
+
+Each agent entry includes its name/ID, lifecycle state and last contact, known
+harnesses, native session keys, hook bindings, native Codex chat ID when available,
+desktop wake configuration and last delivery, unread inbox count, owned job counts
+and current jobs with progress/lease expiry. These details are visible to other
+agents on the same workspace board. Native session keys are stored hashes;
+Claude's raw session ID is not stored here. Unbound agents have empty bindings.
+Model is `null`. Running status follows Codex native hook activity (`true` for
+busy, `false` for idle, `null` for unknown); its source event/time is included in
+the wake binding. Registration/last contact does not prove liveness. Session
+tokens, inheritance credentials and job/delivery mutation tokens remain credentials,
+rather than discovery metadata. Use `target_agent_id` to inspect one agent when a
+workspace-wide response is too large.
 
 Tool responses are capped at **24,000 JSON characters** (Unicode is counted
 without ASCII escaping). Oversized hub results return `RESPONSE_TOO_LARGE`,
@@ -424,15 +443,33 @@ Codex hooks automatically register desktop wake when they link an exclusive
 native chat identity, and restore missing bindings on subsequent activity.
 No manual enable step is required with working native hooks. Without hooks,
 `board_desktop_wake action=enable` requires your verified native chat ID and workspace. The hub's small
-Python worker observes new inbox IDs and calls `codex queue` once per pending
+Python worker maintains existing board event sources and observes new inbox IDs,
+then calls `codex queue` once per pending
 batch. It invokes no model while waiting. Never install a heartbeat schedule or
 periodic model check for this feature.
+
+Only hook-confirmed idle Codex chats receive queued wakes. User prompts and tool
+hooks mark a chat busy; Stop marks it idle. While busy the queue worker does
+nothing for delivery; ordinary inbox access/hooks continue as before. An unknown
+activity state also defers queue delivery until a native hook establishes idle.
+Unread messages remain eligible after Stop; messages acknowledged during work
+never cause a later queued wake. The worker rechecks activity before submission.
+No timeout silently converts busy/unknown to idle. This is a native-hook snapshot;
+there is no atomic transaction between the board database and Codex's queue, so
+a turn beginning immediately after the final check can still race with delivery.
 
 Only new durable inbox messages cause a queue submission. Status reads, notices,
 lock scans, startup with no new messages, and unacknowledged messages already
 queued do not cause repeated wakes. Long bodies stay in the inbox; a bounded wake
 asks the recipient to read them. No extra chunk or follow-up wake is scheduled.
 Existing bindings follow workspace switching, and Claude asyncRewake stays separate.
+The worker checks only tracked paths and existing conditions; it does not walk
+the workspace or renew an agent's contact/leases. Lease-expiry alerts are emitted
+once when locks/jobs expire. Notices and ordinary status checks are not wake events.
+`codex queue` delivers after the active response finishes; it does not steer an
+active turn. Active-turn steering needs a reachable native control transport,
+which the installed desktop may not expose. Do not claim queue acceptance proves
+mid-turn delivery or start a replacement app server to obtain it.
 
 The existing durable reservation/cursor protects concurrent dispatch and hub
 restarts. Queue success records submission, never recipient acknowledgment.
@@ -512,7 +549,8 @@ messages during supported tool activity (including board calls) and at Stop,
 without acknowledging them or guaranteeing idle-session wakeup.
 
 Install `examples/board-skill/` as the personal `board` skill for each harness.
-Use `/board mutex` in Claude Code or `$board mutex` in Codex to review the agent's own locks.
+Use `/board release` in Claude Code or `$board release` in Codex to review and
+release idle direct claims and patch-queue locks. `mutex` remains a legacy alias.
 It releases idle resource locks with a reason and idle file locks with a commit
 hash or HELD handoff. It preserves active process locks and unfinished custody;
 it never takes another agent's locks based on age. Stop hooks also prompt this
@@ -525,7 +563,9 @@ agent ID to retire another agent. This is distinct from takeover: all mutexes ar
 released and unfinished jobs return to OPEN for other workers to claim, rather
 than becoming the caller's work. Unfinished file custody becomes HELD and follows
 the next accepted file claim. Completed jobs/commits, saved progress and inboxes
-remain intact. The retired ID immediately loses hub access and must stop work.
+remain intact. The retired session immediately loses hub access and must stop work.
+Its verified native chat can reconnect later using the same ID; it must reacquire
+released locks and explicitly claim available jobs. No self-inheritance is needed.
 Repeated retirement is harmless; unknown IDs are refused. Processes are not killed.
 
 Without a model or running daemon, use the terminal from this checkout:
@@ -533,7 +573,7 @@ Without a model or running daemon, use the terminal from this checkout:
 ```powershell
 ./board.ps1 status
 ./board.ps1 retire AGENT_ID -Reason 'Quota exhausted; owner releasing this agent'
-./board.ps1 mutex
+./board.ps1 release
 ./board.ps1 jobs
 ```
 
@@ -541,7 +581,8 @@ Cross-platform equivalent: `python boardctl.py retire AGENT_ID --reason "Quota e
 Terminal commands cannot infer a chat's current agent; supply its exact ID from
 status. They execute locally against SQLite, without API calls, model quota,
 registration or another agent's session credentials. All human commands live
-under board; there is no standalone `/mutex` skill.
+under board. Terminal `release` lists direct and patch-queue locks without changing
+them; the `/board release` skill performs the review and scoped releases.
 
 The installer saves private defaults in `.board/operator.json` for the configured
 workspace/database/port. Pass `-Workspace`, `-Database`, `-Port` (Python:
@@ -552,6 +593,10 @@ operator is trusted, just like other local processes with access to this databas
 
 Job tools: `job_post`, `job_list`, `job_claim`, `job_update`, `job_yield`,
 `job_finish`. CLI also offers `heartbeat` and `disconnect`.
+
+`job_list` defaults to live jobs (`OPEN` and `CLAIMED`). Use `state=DONE` for
+completed jobs or `state=ALL` for the full history. `state=OPEN` and
+`state=CLAIMED` remain available; `limit`/`after_id` paginate the filtered list.
 
 A CLI is also available. Each agent needs its own private session credential file:
 

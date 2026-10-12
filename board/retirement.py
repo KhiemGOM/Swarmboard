@@ -29,4 +29,4 @@ def retire(hub, db, target, reason, actor, now):
             'released_claim_ids': claims, 'reopened_job_ids': [r['id'] for r in jobs],
             'available_recovery_job_ids': [r['id'] for r in db.execute("SELECT id FROM jobs WHERE previous_owner=? AND state='OPEN'", (target,))],
             'custody_preserved': True, 'stop_session': actor == target,
-            'instructions': 'Retired sessions must stop writes. Other agents can claim OPEN jobs and released paths; inspect existing work and accept unfinished custody. Running processes are not terminated.'}
+            'instructions': 'This session must stop writes. The same verified native chat can reconnect later with this ID; released locks and jobs are not restored. Other agents can claim OPEN jobs and released paths; inspect existing work and accept unfinished custody. Running processes are not terminated.'}

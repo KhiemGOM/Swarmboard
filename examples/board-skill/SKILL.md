@@ -1,11 +1,11 @@
 ---
 name: board
-description: Coordinate agents sharing a workspace through Swarmboard. Use /board to join or refresh, /board mutex to review locks, /board inherit to continue a predecessor session, or /board retire to retire an agent.
+description: Coordinate agents sharing a workspace through Swarmboard. Use /board to join or refresh, /board release to review and release idle locks, /board inherit to continue a predecessor session, or /board retire to retire an agent.
 ---
 
 # Join or refresh Agent Board
 
-All product shortcuts use the board namespace: /board, /board mutex, /board queue, /board wait,
+All product shortcuts use the board namespace: /board, /board release, /board queue, /board wait,
 /board retire [agent-id], /board inherit OLD_ID [SECRET], /board version,
 /board request-relax FILE, /board relax FILE, /board report FILE
 (Codex: $board with the same arguments).
@@ -132,8 +132,8 @@ processing. Then issue inheritance_key and preserve ID/secret in private handoff
 context for your next successor. Never print secrets in status reports or post
 them to notices, inboxes or source.
 
-For **mutex**, read [references/mutex.md](references/mutex.md) and perform that
-review instead of the normal join workflow.
+For **release** (legacy alias **mutex**), read [references/release.md](references/release.md)
+and review/release idle direct claims and patch-queue memberships instead of joining.
 
 For **queue**, read [references/patch-queue.md](references/patch-queue.md). Use
 the patch queue lock when multiple agents need to prepare changes to one common
@@ -226,7 +226,7 @@ for user silence or infer completion/commit permission from a topic change.
 Additional follow-up work can be a separate job linked with parent_job_id.
 
 Review your own mutexes before scope changes and stopping; release idle locks
-instead of holding them until expiry. Use /board mutex in Claude or $board mutex in Codex
+instead of holding them until expiry. Use /board release in Claude or $board release in Codex
 for a focused review. Resource release needs a reason; unfinished file work
 uses HELD and retains custody. Keep only locks actually needed by current work
 or an active process. Never free another agent's locks based on age alone.

@@ -49,7 +49,7 @@ def process(db, now):
 
 
 def poll(database, workspace):
-    """The existing Claude watcher checks timers without registering a new agent."""
+    """Check timers without registering a new agent (Claude's hook watcher)."""
     db = sqlite3.connect(Path(database).resolve().as_uri() + '?mode=rw', uri=True, timeout=2)
     db.row_factory = sqlite3.Row
     try:
@@ -106,4 +106,4 @@ def dispatch(hub, db, p, agent, now):
     wait_id = existing[0] if existing else db.execute("INSERT INTO board_waits(agent,kind,target,state,created,expires) VALUES (?,?,?,'WAITING',?,?)", (agent, kind, target, now, now + seconds)).lastrowid
     process(db, now)  # check already-met conditions, closing subscribe/event races
     return {'wait': dict(db.execute('SELECT * FROM board_waits WHERE id=?', (wait_id,)).fetchone()),
-            'delivery': 'One system inbox notification. Claude uses the existing linked async watcher; Codex sees it on its next interaction. Patch participants already get the final message, so their completion wait adds no duplicate.'}
+            'delivery': 'One system inbox notification. Claude uses its linked async watcher; Codex uses the hub event worker and native queue wake. Patch participants already get the final message, so their completion wait adds no duplicate.'}

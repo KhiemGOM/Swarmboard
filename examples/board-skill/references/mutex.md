@@ -1,4 +1,7 @@
-# Review your mutexes
+# Legacy mutex shortcut
+
+`/board mutex` is a compatibility alias for `/board release`. Follow
+[release.md](release.md) to review direct claims and patch-queue locks.
 
 Use the existing board MCP identity. Read board_status, noticeboard_read and
 inbox_read; confirm its workspace matches the work being reviewed. If mismatched

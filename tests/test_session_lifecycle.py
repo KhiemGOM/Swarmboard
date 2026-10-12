@@ -44,11 +44,24 @@ class SessionLifecycleTests(unittest.TestCase):
             live_token = db.execute('SELECT token FROM agents WHERE id=?', (self.agent['agent_id'],)).fetchone()[0]
         self.assertEqual(sum(r['session_token']==live_token for r in identities), 1)
 
-    def test_retired_chat_registration_and_send_are_rejected(self):
+    def test_retired_chat_reconnects_with_same_id_without_restoring_ownership(self):
+        claim = self.hub.call('claim', {**self.agent, 'paths':['work.py'], 'reason':'work'})
+        job = self.hub.call('job_post', {**self.agent, 'title':'work', 'description':'work', 'acceptance':'done'})['job']
+        self.hub.call('job_claim', {**self.agent, 'job_id':job['id']})
         self.hub.call('retire', {**self.peer,'target_agent_id':self.agent['agent_id'],'reason':'owner retired'})
-        with self.assertRaisesRegex(BoardError, 'retired'):
-            self.hub.call('register', self.registration)
         self.assert_send_rejected('retired')
+        resumed = self.hub.call('register', self.registration)
+        self.assertEqual(resumed['agent_id'], self.agent['agent_id'])
+        self.assertNotEqual(resumed['session_token'], self.agent['session_token'])
+        status = self.hub.call('board_status', {**resumed,'target_agent_id':'self'})
+        self.assertEqual(status['claims'], [])
+        self.assertEqual(status['custody'][0]['state'], 'HELD')
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT active FROM claims WHERE id=?', (claim['claim_ids'][0],)).fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (job['id'],)).fetchone()[0], 'OPEN')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM agents').fetchone()[0], 2)
+        with self.assertRaisesRegex(BoardError, 'invalid session token'):
+            self.hub.call('board_status', self.agent)
 
     def assert_send_rejected(self, error):
         with self.hub.connect() as db:
@@ -64,15 +77,21 @@ class SessionLifecycleTests(unittest.TestCase):
         current = self.hub.call('register', self.registration)
         self.hub.call('inbox_send', {**self.peer,'recipient_agent_id':current['agent_id'],'body':'live again'})
 
-    def test_inheritance_invalidates_every_old_operation_and_chat_registration(self):
+    def test_inheritance_invalidates_old_credentials_but_native_owner_can_rejoin(self):
+        claim = self.hub.call('claim', {**self.agent, 'paths':['handed.py'], 'reason':'work'})
         self.hub.call('inherit', {**self.peer,'target_agent_id':self.agent['agent_id'],
                                  'inheritance_secret':self.agent['inheritance_secret'],'reason':'continue'})
         for method in ('board_status','inbox_read','inbox_ack','claim','inheritance_key','disconnect'):
             with self.subTest(method=method), self.assertRaisesRegex(BoardError, 'retired'):
                 self.hub.call(method, self.agent)
-        with self.assertRaisesRegex(BoardError, 'retired'):
-            self.hub.call('register', self.registration)
         self.assert_send_rejected('Address successor')
+        resumed = self.hub.call('register', self.registration)
+        self.assertEqual(resumed['agent_id'], self.agent['agent_id'])
+        self.assertEqual(self.hub.call('board_status', {**resumed,'target_agent_id':'self'})['claims'], [])
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT agent FROM claims WHERE id=?', (claim['claim_ids'][0],)).fetchone()[0], self.peer['agent_id'])
+        with self.assertRaisesRegex(BoardError, 'invalid session token'):
+            self.hub.call('board_status', self.agent)
 
     def test_retirement_and_inheritance_disable_old_wake_binding(self):
         self.hub.call('board_desktop_wake', {**self.agent,'action':'enable','thread_id':'chat-one',

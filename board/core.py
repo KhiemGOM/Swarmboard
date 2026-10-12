@@ -130,22 +130,26 @@ class Hub:
                 result.update(reminder(db, params['agent_id']))
         return result
 
+    def expire_leases(self, db, now):
+        """Shared lease maintenance for calls and the event worker; never renews agents."""
+        from . import jobs
+        jobs.expire(self, db, now)
+        expired = db.execute("SELECT id,agent,path,kind FROM claims WHERE active=1 AND expires<=?", (now,)).fetchall()
+        for item in expired:
+            self.event(db, "claim_expired", item["agent"], dict(item))
+            if item["kind"] == "file":
+                db.execute("UPDATE custody SET state='HELD',reason='Lease expired; completion evidence still required',updated=? WHERE path=? AND owner=? AND state='ACTIVE'",
+                           (now, item["path"], item["agent"]))
+        db.execute("UPDATE claims SET active=0 WHERE active=1 AND expires<=?", (now,))
+        for owner in {item['agent'] for item in expired if item['kind'] == 'file'}:
+            jobs.recover_untracked(self, db, owner, now, 'File lease expired; recovery review required, not proof of agent death')
+
     def _call(self, method, params):
         with self.connect() as db:
             # Serializes claim-check + insertion and takeover + transfer.
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
-            from . import jobs
-            jobs.expire(self, db, now)
-            expired = db.execute("SELECT id,agent,path,kind FROM claims WHERE active=1 AND expires<=?", (now,)).fetchall()
-            for item in expired:
-                self.event(db, "claim_expired", item["agent"], dict(item))
-                if item["kind"] == "file":
-                    db.execute("UPDATE custody SET state='HELD',reason='Lease expired; completion evidence still required',updated=? WHERE path=? AND owner=? AND state='ACTIVE'",
-                               (now, item["path"], item["agent"]))
-            db.execute("UPDATE claims SET active=0 WHERE active=1 AND expires<=?", (now,))
-            for owner in {item['agent'] for item in expired if item['kind'] == 'file'}:
-                jobs.recover_untracked(self, db, owner, now, 'File lease expired; recovery review required, not proof of agent death')
+            self.expire_leases(db, now)
             if method == "register":
                 name = params.get("name", "agent")
                 if not isinstance(name, str) or not name.strip():
@@ -157,10 +161,10 @@ class Hub:
                         raise BoardError('Invalid native adapter session binding')
                     prior = db.execute('SELECT a.* FROM native_sessions n JOIN agents a ON a.id=n.agent WHERE n.harness=? AND n.session_key=?', (harness, key)).fetchone()
                     if prior:
-                        if prior['state'] != 'active' or prior['successor_id']:
-                            raise BoardError('Native chat identity is retired; no automatic replacement registration')
                         token = secrets.token_urlsafe(32)
-                        db.execute('UPDATE agents SET token=?,seen=?,disconnected=NULL WHERE id=?', (token, now, prior['id']))
+                        db.execute("UPDATE agents SET token=?,state='active',seen=?,disconnected=NULL,reason=NULL,successor_id=NULL WHERE id=?", (token, now, prior['id']))
+                        if prior['state'] == 'retired':
+                            self.event(db, 'agent_resumed', prior['id'], {'source': 'native_registration', 'previous_successor_id': prior['successor_id']})
                         from .inheritance import issue
                         return {'agent_id': prior['id'], 'session_token': token, 'workspace': str(self.workspace),
                                 'inheritance_secret': issue(db, prior['id']), 'instructions': COORDINATION_RULES, 'resumed': True}
@@ -184,8 +188,8 @@ class Hub:
             identity = db.execute("SELECT * FROM agents WHERE id=?", (agent,)).fetchone()
             if not identity or not secrets.compare_digest(identity["token"], str(params.get("session_token", ""))):
                 raise BoardError("Unknown agent or invalid session token")
-            if identity["state"] != "active":
-                raise BoardError("Session retired. Stop using this identity; no automatic replacement registration.")
+            if identity["state"] != "active" and method != 'native_reconnect':
+                raise BoardError("Session retired. Reconnect this same native chat to resume its ID; released locks and jobs are not restored.")
             if method == 'session_end':
                 # Token validation fences a late hook from an older connection.
                 # Skip scans and previews to stay within native hook budgets.
@@ -200,6 +204,10 @@ class Hub:
             else:
                 file_lifecycle.initialize(db)
             result = self.dispatch(db, method, params, agent, now)
+            if method == 'hook_status':
+                result['your_agent_id'] = agent
+                check(method, result)
+                return result
             own = db.execute('SELECT name,name_chosen FROM agents WHERE id=?', (agent,)).fetchone()
             result['your_name'] = own['name']
             if not own['name_chosen'] and not result.get('stop_session'):
@@ -236,6 +244,28 @@ class Hub:
             return result
 
     def dispatch(self, db, method, p, agent, now):
+        if method == 'hook_status':
+            from .claims import intersects, exclusions, resource
+            paths = [self.path(value) for value in p.get('paths', [])]
+            resources = [resource(value) for value in p.get('resources', [])]
+            owned = list(db.execute('SELECT * FROM claims WHERE agent=? AND active=1', (agent,)))
+            claims = [{'id': row['id'], 'agent': agent, 'path': row['path'], 'kind': row['kind'], 'exclusions': exclusions(row)}
+                      for row in owned if (row['kind'] == 'file' and any(intersects(row, path) for path in paths))
+                      or (row['kind'] == 'resource' and row['path'] in resources)]
+            unread = db.execute('SELECT COUNT(*) FROM messages WHERE recipient=? AND acknowledged IS NULL', (agent,)).fetchone()[0]
+            held = db.execute("SELECT COUNT(*) FROM custody WHERE owner=? AND state='HELD'", (agent,)).fetchone()[0]
+            jobs = db.execute("SELECT COUNT(*) FROM jobs WHERE owner=? AND state='CLAIMED'", (agent,)).fetchone()[0]
+            patches = db.execute("SELECT COUNT(*) FROM patches WHERE agent=? AND state='APPLIED'", (agent,)).fetchone()[0]
+            result = {'workspace': str(self.workspace), 'claims': claims, 'claim_count': len(owned), 'unread_inbox': unread}
+            if unread:
+                result['inbox_reminder'] = f'You have {unread} unread message(s). Call inbox_read, then inbox_ack after processing.'
+            if held:
+                result['custody_reminder'] = f'{held} HELD path(s) await commit evidence or a handoff.'
+            if jobs:
+                result['job_reminder'] = f'{jobs} unfinished job(s). Save progress, finish with evidence or yield.'
+            if patches:
+                result['patch_custody_reminder'] = f'{patches} applied patch(es) await commit evidence.'
+            return result
         if method == 'board_agent_name':
             import unicodedata
             name = p.get('name')
@@ -324,6 +354,8 @@ class Hub:
                     if any(self.overlaps(queued['path'], path) for path in queries.get('paths', [])):
                         holders.update(row[0] for row in db.execute('SELECT agent FROM patch_members WHERE batch_id=?', (queued['id'],)))
                 agents = [row for row in agents if row['id'] in holders]
+            from .agent_status import enrich
+            enrich(db, agents)
             for row in custody:
                 observed = db.execute('SELECT present FROM file_observations WHERE path=?', (row['path'],)).fetchone()
                 if observed:

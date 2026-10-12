@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('start','status','mutex','jobs','retire','wake','configure','cleanup')]
+    [ValidateSet('start','status','release','mutex','jobs','retire','wake','configure','cleanup')]
     [string]$Command = 'start',
     [string]$AgentId,
     [string]$Reason,

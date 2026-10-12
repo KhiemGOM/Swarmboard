@@ -50,12 +50,19 @@ class NativeReconnectTests(unittest.TestCase):
         self.bind(fresh, session='native-chat-two')
         self.assertEqual(reconnect_identity(self.args, fresh, self.caller)['agent_id'], fresh['agent_id'])
 
-    def test_invalidated_predecessor_is_not_revived(self):
+    def test_handed_off_native_owner_can_rejoin_without_taking_back_work(self):
+        claim = self.hub.call('claim', {**self.old, 'paths':['handoff.py'], 'reason':'work'})
         fresh = self.hub.call('register', {'name':'codex'})
         self.bind(fresh)
-        self.hub.call('retire', {**fresh, 'target_agent_id':self.old['agent_id'], 'reason':'owner retired'})
-        with self.assertRaisesRegex(BoardError, 'no longer valid'):
-            reconnect_identity(self.args, fresh, self.caller)
+        self.hub.call('inherit', {**fresh, 'target_agent_id':self.old['agent_id'],
+                                'inheritance_secret':self.old['inheritance_secret'], 'reason':'handoff'})
+        # The proof written before the handoff was invalidated by credential/state change.
+        self.bind(self.old)
+        resumed = reconnect_identity(self.args, self.old, self.caller)
+        self.assertEqual(resumed['agent_id'], self.old['agent_id'])
+        self.assertEqual(self.hub.call('board_status', {**resumed,'target_agent_id':'self'})['claims'], [])
+        with self.hub.connect() as db:
+            self.assertEqual(db.execute('SELECT agent FROM claims WHERE id=?', (claim['claim_ids'][0],)).fetchone()[0], fresh['agent_id'])
 
     def test_provisional_work_prevents_silent_identity_change(self):
         fresh = self.hub.call('register', {'name':'codex'})
@@ -74,3 +81,41 @@ class NativeReconnectTests(unittest.TestCase):
         fresh = self.hub.call('register', {'name':'claude'})
         self.assertIn('same native chat', str(link(fresh)))
         self.assertEqual(reconnect_identity(self.args, fresh, self.caller)['agent_id'], who['agent_id'])
+
+    def test_retired_bridge_resumes_own_id_from_verified_native_hook(self):
+        self.hub.call('claim', {**self.old, 'paths':['a.py'], 'reason':'work'})
+        self.hub.call('retire', {**self.old, 'reason':'done for now'})
+        self.assertIn('same native chat', str(self.bind(self.old)))
+        resumed = reconnect_identity(self.args, self.old, self.caller)
+        self.assertEqual(resumed['agent_id'], self.old['agent_id'])
+        status = self.hub.call('board_status', {**resumed, 'target_agent_id':'self'})
+        self.assertEqual(status['claims'], [])
+        self.assertEqual(status['custody'][0]['state'], 'HELD')
+        with self.assertRaisesRegex(BoardError, 'invalid session token'):
+            self.hub.call('board_status', self.old)
+
+    def test_retired_claude_bridge_keeps_id_after_mcp_reconnect(self):
+        adapter = Adapter(self.root, self.hub.database, 'claude', caller=self.caller)
+        who = self.hub.call('register', {'name':'claude'})
+        def link(identity):
+            return adapter.handle({'session_id':'claude-chat','cwd':str(self.root),
+                'hook_event_name':'PostToolUse','tool_name':'mcp__board__board_status',
+                'tool_response':{'your_agent_id':identity['agent_id']}})
+        link(who)
+        self.hub.call('retire', {**who, 'reason':'release'})
+        fresh = self.hub.call('register', {'name':'claude'})
+        self.assertIn('same native chat', str(link(fresh)))
+        resumed = reconnect_identity(self.args, fresh, self.caller)
+        self.assertEqual(resumed['agent_id'], who['agent_id'])
+        with self.assertRaisesRegex(BoardError, 'retired'):
+            self.hub.call('board_status', fresh)
+
+    def test_wrong_native_chat_cannot_resume_retired_id(self):
+        self.hub.call('retire', {**self.old, 'reason':'release'})
+        fresh = self.hub.call('register', {'name':'codex'})
+        self.bind(fresh, session='another-chat')
+        self.assertEqual(reconnect_identity(self.args, fresh, self.caller)['agent_id'], fresh['agent_id'])
+        with self.assertRaisesRegex(BoardError, 'same chat'):
+            self.hub.call('native_reconnect', {**fresh, 'target_agent_id':self.old['agent_id'],
+                'target_session_token':self.old['session_token'], 'harness':'codex',
+                'session_key':hashlib.sha256(b'codex:another-chat').hexdigest(), 'native_session_id':'another-chat'})

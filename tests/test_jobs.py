@@ -43,6 +43,23 @@ class JobTests(unittest.TestCase):
             self.assertEqual(sorted(pool.map(compete, [self.a, self.b])), [False, True])
         self.assertEqual(self.call(self.a, 'board_status')['claims'], [])
 
+    def test_list_defaults_to_live_with_explicit_history_and_pagination(self):
+        done = self.claim(self.a, self.post())
+        self.finish(self.a, done, commit_hash='abcdef0', checks=self.evidence())
+        opened = self.post()
+        claimed = self.claim(self.b, self.post())
+        live = self.call(self.a, 'job_list')['jobs']
+        self.assertEqual([row['id'] for row in live], [opened['id'], claimed['id']])
+        self.assertEqual([row['id'] for row in self.call(self.a, 'job_list', state='DONE')['jobs']], [done['id']])
+        self.assertEqual(len(self.call(self.a, 'job_list', state='ALL')['jobs']), 3)
+        first = self.call(self.a, 'job_list', limit=1)['jobs'][0]
+        self.assertEqual(first['id'], opened['id'])
+        second = self.call(self.a, 'job_list', limit=1, after_id=first['id'])['jobs'][0]
+        self.assertEqual(second['id'], claimed['id'])
+        self.assertNotIn('lease_token', second)
+        with self.assertRaises(BoardError):
+            self.call(self.a, 'job_list', state='INVALID')
+
     def test_completion_requires_hash_and_passing_or_explained_checks(self):
         job = self.claim(self.a, self.post())
         for values in ({'checks': self.evidence()}, {'commit_hash': 'abcdef0', 'checks': []},
@@ -54,7 +71,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual(done['job']['state'], 'DONE')
         self.assertFalse(done['evidence_verified'])
         self.hub = Hub(self.root / 'hub.sqlite', self.root)
-        self.assertEqual(self.call(self.b, 'job_list')['jobs'][0]['checks'], self.evidence())
+        self.assertEqual(self.call(self.b, 'job_list', state='DONE')['jobs'][0]['checks'], self.evidence())
         self.assertFalse(self.call(self.b, 'job_claim', job_id=job['id'])['accepted'])
 
     def test_expiry_preserves_progress_and_fences_old_worker(self):

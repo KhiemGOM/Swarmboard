@@ -84,11 +84,12 @@ def dispatch(hub, db, method, p, agent, now):
         return {'job': view(db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone(), agent)}
     if method == 'job_list':
         state = p.get('state')
-        if state is not None and state not in ('OPEN', 'CLAIMED', 'DONE'):
-            raise BoardError('state must be OPEN, CLAIMED or DONE')
+        state = 'LIVE' if state is None else state
+        if state not in ('LIVE', 'OPEN', 'CLAIMED', 'DONE', 'ALL'):
+            raise BoardError('state must be LIVE, OPEN, CLAIMED, DONE or ALL')
         from .responses import page
         after, limit = page(p)
-        rows = db.execute('SELECT * FROM jobs WHERE id>? AND (? IS NULL OR state=?) ORDER BY id LIMIT ?', (after, state, state, limit))
+        rows = db.execute("SELECT * FROM jobs WHERE id>? AND (?='ALL' OR (?='LIVE' AND state IN ('OPEN','CLAIMED')) OR state=?) ORDER BY id LIMIT ?", (after, state, state, state, limit))
         return {'jobs': [view(row, agent) for row in rows]}
     job_id = p.get('job_id')
     if type(job_id) is not int:
