@@ -55,6 +55,17 @@ class Hub:
             patch_queue.initialize(db)
             waits.initialize(db)
             coordination.initialize(db)
+            from . import activity
+            activity.initialize(db)
+            from .reminders import initialize as initialize_reminders
+            initialize_reminders(db)
+            db.execute("INSERT OR IGNORE INTO settings VALUES ('database_id', ?)", (secrets.token_hex(16),))
+            self.database_id = db.execute("SELECT value FROM settings WHERE key='database_id'").fetchone()[0]
+            for column, kind in [('deleted_at', 'REAL'), ('deletion_reason', 'TEXT')]:
+                if column not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
+                    db.execute(f'ALTER TABLE jobs ADD COLUMN {column} {kind}')
+            if 'followups' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute("ALTER TABLE jobs ADD COLUMN followups TEXT NOT NULL DEFAULT '[]'")
             from .sessions import migrate
             migrate(db)
             if "disconnected" not in {row[1] for row in db.execute("PRAGMA table_info(agents)")}:
@@ -150,24 +161,40 @@ class Hub:
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
             self.expire_leases(db, now)
-            if method == "register":
+            if now - getattr(self, 'pruned_at', 0) > 3600:
+                from .retention import prune
+                prune(db, now)
+                self.pruned_at = now
+            if method in ('register', 'identity_resume'):
                 name = params.get("name", "agent")
                 if not isinstance(name, str) or not name.strip():
                     raise BoardError("Agent name is required")
                 harness, key = params.get('native_harness'), params.get('native_session_key')
+                requested_id = params.get('resume_agent_id')
+                if 'resume_agent_id' in params and (not isinstance(requested_id, str) or not requested_id.strip() or len(requested_id) > 128):
+                    raise BoardError('resume_agent_id must be an existing board agent ID')
+                prior = None
                 if harness is not None or key is not None:
                     import re
                     if harness not in ('codex', 'claude', 'claude-code', 'claude-desktop') or not isinstance(key, str) or not re.fullmatch('[0-9a-f]{64}', key):
                         raise BoardError('Invalid native adapter session binding')
                     prior = db.execute('SELECT a.* FROM native_sessions n JOIN agents a ON a.id=n.agent WHERE n.harness=? AND n.session_key=?', (harness, key)).fetchone()
-                    if prior:
-                        token = secrets.token_urlsafe(32)
-                        db.execute("UPDATE agents SET token=?,state='active',seen=?,disconnected=NULL,reason=NULL,successor_id=NULL WHERE id=?", (token, now, prior['id']))
-                        if prior['state'] == 'retired':
-                            self.event(db, 'agent_resumed', prior['id'], {'source': 'native_registration', 'previous_successor_id': prior['successor_id']})
-                        from .inheritance import issue
-                        return {'agent_id': prior['id'], 'session_token': token, 'workspace': str(self.workspace),
-                                'inheritance_secret': issue(db, prior['id']), 'instructions': COORDINATION_RULES, 'resumed': True}
+                if requested_id is not None:
+                    prior = db.execute('SELECT * FROM agents WHERE id=?', (requested_id,)).fetchone()
+                    if not prior:
+                        raise BoardError('Unknown board agent ID; use your native chat ID to join instead')
+                    if key is not None:
+                        from .sessions import identify
+                        identify(db, harness, key, requested_id)
+                if prior:
+                    token = secrets.token_urlsafe(32)
+                    db.execute("UPDATE agents SET token=?,state='active',seen=?,disconnected=NULL,reason=NULL,successor_id=NULL WHERE id=?", (token, now, prior['id']))
+                    self.event(db, 'identity_selected', prior['id'], {'source': 'agent_id' if requested_id else 'native_chat_id'})
+                    if prior['state'] == 'retired':
+                        self.event(db, 'agent_resumed', prior['id'], {'source': 'native_registration', 'previous_successor_id': prior['successor_id']})
+                    from .inheritance import issue
+                    return {'agent_id': prior['id'], 'session_token': token, 'workspace': str(self.workspace),
+                            'inheritance_secret': issue(db, prior['id']), 'instructions': COORDINATION_RULES, 'resumed': True}
                 agent = secrets.token_hex(8)
                 while db.execute('SELECT 1 FROM agents WHERE id=?', (agent,)).fetchone():
                     agent = secrets.token_hex(8)
@@ -184,12 +211,30 @@ class Hub:
                         "instructions": COORDINATION_RULES}
                 check(method, result)
                 return result
+            if method == 'native_reconnect':
+                from .sessions import reconnect
+                return reconnect(self, db, params, params.get('agent_id'), now)
             agent = params.get("agent_id")
             identity = db.execute("SELECT * FROM agents WHERE id=?", (agent,)).fetchone()
-            if not identity or not secrets.compare_digest(identity["token"], str(params.get("session_token", ""))):
+            if not identity:
                 raise BoardError("Unknown agent or invalid session token")
+            # Agents cooperate locally: an active board ID is sufficient identity.
+            # Only late lifecycle callbacks need a connection-generation fence.
+            if method in ('session_end', 'disconnect') and not secrets.compare_digest(identity['token'], str(params.get('session_token', ''))):
+                raise BoardError('Outdated connection close: invalid session token; current identity is still usable')
             if identity["state"] != "active" and method != 'native_reconnect':
                 raise BoardError("Session retired. Reconnect this same native chat to resume its ID; released locks and jobs are not restored.")
+            if method == 'board_reset':
+                # The hook only lets this through after the user typed /board reset in that chat.
+                reason = params.get('reason')
+                if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+                    raise BoardError('board_reset requires a reason of 1 to 2000 characters')
+                from .retention import reset
+                removed = reset(db)
+                self.event(db, 'board_reset', agent, {'reason': reason, 'removed': removed})
+                return {'reset': True, 'workspace': str(self.workspace), 'removed': removed,
+                        'instructions': 'Board wiped. Every chat gets a fresh identity on its next board call; '
+                                        'run board_status to join again. Files on disk were not touched.'}
             if method == 'session_end':
                 # Token validation fences a late hook from an older connection.
                 # Skip scans and previews to stay within native hook budgets.
@@ -203,6 +248,9 @@ class Hub:
                 file_lifecycle.reconcile(self, db, agent, now)
             else:
                 file_lifecycle.initialize(db)
+            if method in ('board_status', 'heartbeat', 'hook_status'):
+                from .custody_policy import close
+                close(self, db, agent, now)
             result = self.dispatch(db, method, params, agent, now)
             if method == 'hook_status':
                 result['your_agent_id'] = agent
@@ -215,35 +263,25 @@ class Hub:
             file_lifecycle.reconcile(self, db, agent, now)
             unread = db.execute("SELECT COUNT(*) FROM messages WHERE recipient=? AND acknowledged IS NULL", (agent,)).fetchone()[0]
             result["unread_inbox"] = unread
-            if unread:
-                result["inbox_reminder"] = f"You have {unread} unread message(s). Call inbox_read, then inbox_ack after processing."
-                if method != 'inbox_read':
-                    result['inbox_preview'] = [
-                        {'id': row['id'], 'sender': row['sender'], 'body': row['body'][:1000]}
-                        for row in db.execute('SELECT id,sender,body FROM messages WHERE recipient=? AND acknowledged IS NULL ORDER BY id LIMIT 3', (agent,))]
-            held = db.execute("SELECT COUNT(*) FROM custody WHERE owner=? AND state='HELD'", (agent,)).fetchone()[0]
-            if held and not result.get('stop_session'):
-                result["custody_reminder"] = f"You retain custody of {held} HELD path(s). Complete and record commit evidence with custody_resolve, or arrange an explicit takeover."
-                oldest = db.execute("SELECT MIN(a.since) FROM custody_age a JOIN custody c ON c.path=a.path WHERE c.owner=? AND c.state='HELD'", (agent,)).fetchone()[0]
-                if oldest is not None and now - oldest >= 7200:
-                    result['custody_reminder'] += f' Oldest unresolved work is {int((now-oldest)/3600)}h old (over 2h). Commit small coherent pieces; reclaim/release does not reset this age.'
-            patch_count = db.execute("SELECT COUNT(*) FROM patches WHERE agent=? AND state='APPLIED'", (agent,)).fetchone()[0]
-            if patch_count:
-                result['patch_custody_reminder'] = f'{patch_count} applied patch(es) await commit evidence. Inspect/test, commit, then patch_queue action=record_commit with your patch_ids and commit_hash.'
-                oldest_patch = db.execute("SELECT MIN(created) FROM patches WHERE agent=? AND state='APPLIED'", (agent,)).fetchone()[0]
-                if now - oldest_patch >= 7200:
-                    result['patch_custody_reminder'] += ' Some patch work is over 2h old; commit small coherent pieces.'
-            owned = db.execute("SELECT id,expires FROM jobs WHERE state='CLAIMED' AND owner=?", (agent,)).fetchall()
-            if owned:
-                result['job_reminder'] = 'You own unfinished jobs. Use job_update to save progress and renew leases; job_finish with evidence or job_yield with a handoff. Job ownership does not grant file/resource locks.'
-                result['owned_jobs'] = [dict(r) for r in owned[:10]]
-                result['owned_jobs_count'] = len(owned)
-                if len(owned) > 10:
-                    result['job_reminder'] += ' Only the first 10 reminders are shown; use job_list with state=CLAIMED and pagination for details.'
+            from .reminders import attach
+            if not result.get('stop_session'):
+                attach(db, agent, result, include_inbox=method != 'inbox_read')
+            from .read_pages import fit
+            result = fit(method, result, params)
+            if method == 'inbox_read':
+                from .reminders import changed
+                for message in result['messages']:
+                    changed(db, agent, 'message:' + str(message['id']), message['id'])
             check(method, result)
             return result
 
     def dispatch(self, db, method, p, agent, now):
+        if method == 'board_read':
+            from .read_pages import detail
+            return detail(self, db, p, agent)
+        if method == 'board_activity':
+            from .activity import dispatch
+            return dispatch(self, db, p, agent, now)
         if method == 'hook_status':
             from .claims import intersects, exclusions, resource
             paths = [self.path(value) for value in p.get('paths', [])]
@@ -256,15 +294,9 @@ class Hub:
             held = db.execute("SELECT COUNT(*) FROM custody WHERE owner=? AND state='HELD'", (agent,)).fetchone()[0]
             jobs = db.execute("SELECT COUNT(*) FROM jobs WHERE owner=? AND state='CLAIMED'", (agent,)).fetchone()[0]
             patches = db.execute("SELECT COUNT(*) FROM patches WHERE agent=? AND state='APPLIED'", (agent,)).fetchone()[0]
-            result = {'workspace': str(self.workspace), 'claims': claims, 'claim_count': len(owned), 'unread_inbox': unread}
-            if unread:
-                result['inbox_reminder'] = f'You have {unread} unread message(s). Call inbox_read, then inbox_ack after processing.'
-            if held:
-                result['custody_reminder'] = f'{held} HELD path(s) await commit evidence or a handoff.'
-            if jobs:
-                result['job_reminder'] = f'{jobs} unfinished job(s). Save progress, finish with evidence or yield.'
-            if patches:
-                result['patch_custody_reminder'] = f'{patches} applied patch(es) await commit evidence.'
+            result = {'workspace': str(self.workspace), 'claims': claims, 'claim_count': len(owned), 'unread_inbox': unread, 'owned_jobs_count': jobs}
+            from .reminders import attach
+            attach(db, agent, result, force=p.get('force_reminders') is True)
             return result
         if method == 'board_agent_name':
             import unicodedata
@@ -300,7 +332,7 @@ class Hub:
             identity = db.execute('SELECT inherited_from,successor_id,inherited_at FROM agents WHERE id=?', (agent,)).fetchone()
             return {'service': 'swarmboard', 'version': VERSION, 'schema_version': SCHEMA_VERSION,
                     'workspace': str(self.workspace), 'started_at': self.started_at,
-                    'uptime_seconds': max(0, now - self.started_at), 'features': FEATURES,
+                    'uptime_seconds': max(0, now - self.started_at), 'features': FEATURES, 'database_id': self.database_id,
                     'max_response_chars': MAX_RESPONSE_CHARS, 'queue_only_files': hot_files(self),
                     'lineage': dict(identity), 'inheritance_secret_ready': bool(db.execute('SELECT inheritance_hash FROM agents WHERE id=?', (agent,)).fetchone()[0]),
                     'inbox_delivery': {'claude': 'asyncRewake watcher plus tool/prompt previews; requires installed, linked hooks',
@@ -445,10 +477,19 @@ class Hub:
             if method == "noticeboard_post":
                 cursor = db.execute("INSERT INTO posts(agent,body,created) VALUES (?,?,?)", (agent, body, now))
             else:
-                recipient = p.get("recipient_agent_id")
+                fields = [key for key in ('recipient_agent_id', 'to', 'recipient') if key in p]
+                if not fields:
+                    raise BoardError('Missing recipient_agent_id (aliases: to, recipient). Use the exact ID from board_status.')
+                values = [p[key] for key in fields]
+                if any(not isinstance(value, str) or not value.strip() for value in values):
+                    raise BoardError('Recipient must be a non-empty exact agent ID, not a display name.')
+                values = {value.strip() for value in values}
+                if len(values) != 1:
+                    raise BoardError('Conflicting recipient_agent_id/to/recipient values; supply one exact agent ID.')
+                recipient = values.pop()
                 destination = db.execute('SELECT state,disconnected,successor_id FROM agents WHERE id=?', (recipient,)).fetchone()
                 if not destination:
-                    raise BoardError("Unknown recipient")
+                    raise BoardError(f'Unknown recipient ID {recipient[:80]!r} in {self.workspace}. Use board_status for an exact ID; display names are not IDs.')
                 if destination['state'] != 'active':
                     successor = destination['successor_id']
                     raise BoardError('Recipient is retired; message rejected.' + (f' Address successor {successor} explicitly.' if successor else ''))
@@ -459,10 +500,10 @@ class Hub:
             return {"id": cursor.lastrowid}
         if method == "noticeboard_read":
             after, limit = page(p)
-            return {"posts": [dict(r) for r in db.execute("SELECT * FROM posts WHERE id>? ORDER BY id LIMIT ?", (after, limit))]}
+            return {"posts": [dict(r) for r in db.execute("SELECT * FROM posts WHERE id>? ORDER BY id LIMIT ?", (after, limit + 1))]}
         if method == "inbox_read":
             after, limit = page(p)
-            return {"messages": [dict(r) for r in db.execute("SELECT * FROM messages WHERE recipient=? AND acknowledged IS NULL AND id>? ORDER BY id LIMIT ?", (agent, after, limit))]}
+            return {"messages": [dict(r) for r in db.execute("SELECT * FROM messages WHERE recipient=? AND acknowledged IS NULL AND id>? ORDER BY id LIMIT ?", (agent, after, limit + 1))]}
         if method == "inbox_ack":
             ids = p.get("message_ids")
             if not isinstance(ids, list) or not ids or any(type(i) is not int for i in ids):

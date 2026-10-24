@@ -229,13 +229,13 @@ class FileLifecycleTests(unittest.TestCase):
         self.assertEqual(self.call('board_cleanup')['deletion_count'], 0)
         self.assertEqual(self.call('board_status')['custody'][0]['state'], 'HELD')
 
-    def test_mcp_cleanup_requires_valid_agent_authentication(self):
+    def test_mcp_cleanup_accepts_known_id_and_rejects_unknown_id(self):
         path = self.root / 'a.py'
         path.write_text('work')
         claim = self.call('claim', paths=['a.py'], reason='Work')
         path.unlink()
-        with self.assertRaisesRegex(BoardError, 'invalid session'):
-            self.hub.call('board_cleanup', {'agent_id': self.agent['agent_id'], 'session_token': 'invalid'})
+        with self.assertRaisesRegex(BoardError, 'Unknown agent'):
+            self.hub.call('board_cleanup', {'agent_id': 'unknown'})
         with self.hub.connect() as db:
             self.assertEqual(db.execute('SELECT active FROM claims WHERE id=?', (claim['claim_ids'][0],)).fetchone()[0], 1)
-        self.assertEqual(self.call('board_cleanup')['deletion_count'], 1)
+        self.assertEqual(self.hub.call('board_cleanup', {'agent_id': self.agent['agent_id']})['deletion_count'], 1)

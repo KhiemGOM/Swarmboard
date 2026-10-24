@@ -26,13 +26,7 @@ def main():
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     codex_config = user / ".codex/config.toml"
     claude_config = user / ".claude.json"
-    desktop_config = options.desktop_config
-    if desktop_config is None:
-        candidates = [user / "AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude/claude_desktop_config.json",
-                      user / "AppData/Roaming/Claude/claude_desktop_config.json",
-                      user / "Library/Application Support/Claude/claude_desktop_config.json"]
-        desktop_config = next((p for p in candidates if p.exists()), None)
-    for config in (codex_config, claude_config, desktop_config):
+    for config in (codex_config, claude_config):
         if config is not None and config.exists():
             backup = config.with_name(config.name + ".board-backup-" + stamp)
             shutil.copy2(config, backup)
@@ -69,16 +63,15 @@ def main():
     installed = json.loads(claude_config.read_text(encoding="utf-8"))["mcpServers"]["board"]
     if installed["command"] != python or installed["args"] != [*code_args, "--name", "claude-code"]:
         raise SystemExit("Claude registration verification failed")
-    if desktop_config is not None and desktop_config.exists():
-        desktop = json.loads(desktop_config.read_text(encoding="utf-8"))
-        # Desktop's Chat definition overrides the same name in local Code chats.
-        # Use the Code registration so native per-chat identity stays available.
-        desktop.get("mcpServers", {}).pop("board", None)
-        temporary = desktop_config.with_name(desktop_config.name + ".board-install.tmp")
-        temporary.write_text(json.dumps(desktop, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, desktop_config)
+    # Desktop runs its own board definition once and shares it between every local
+    # Code chat, overriding the per-chat registration. Remove it from every profile.
+    from board.desktop_config import duplicates, strip_board
+    for desktop_config in [options.desktop_config] if options.desktop_config else duplicates():
+        if desktop_config.exists() and strip_board(desktop_config):
+            print("Removed duplicate board server (backup kept):", desktop_config)
     print("Installed board for Codex and user-level Claude Code (including Desktop local Code).")
-    operator_config = workspace / '.codex/board-operator.json'
+    from board.runtime import ROUTE
+    operator_config = workspace / ROUTE
     operator_config.parent.mkdir(parents=True, exist_ok=True)
     operator_config.write_text(json.dumps({'workspace': str(workspace), 'database': str(database), 'port': options.port}, indent=2), encoding='utf-8')
 

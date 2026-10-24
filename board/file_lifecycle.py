@@ -83,7 +83,10 @@ def reconcile(hub, db, observer, now):
 
 def cleanup(hub, db, observer, now):
     deleted = reconcile(hub, db, observer, now)
+    from .custody_policy import close
+    completed = close(hub, db, observer, now)
     return {'workspace': str(hub.workspace), 'deletion_count': len(deleted),
+            'scratch_completed': completed,
             'released_claim_count': sum(len(row['released_claim_ids']) for row in deleted),
             'deletions': deleted[:10], 'has_more': len(deleted) > 10,
             'history_tool': 'board_file action=history'}
@@ -98,10 +101,15 @@ def dispatch(hub, db, p, agent, now):
         after, limit = p.get('after_id', 0), p.get('limit', 5)
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 10:
             raise BoardError('history requires nonnegative after_id and limit between 1 and 10')
-        rows = [dict(row) for row in db.execute('SELECT * FROM file_deletions WHERE path=? AND id>? ORDER BY id LIMIT ?', (path, after, limit))]
+        rows = [dict(row) for row in db.execute('SELECT * FROM file_deletions WHERE path=? AND id>? ORDER BY id LIMIT ?', (path, after, limit + 1))]
         for row in rows:
             row['released_claims'] = json.loads(row['released_claims'])
-        return {'path': path, 'records': rows}
+        result = {'path': path, 'records': rows}
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='scratch_completions'").fetchone():
+            count = db.execute('SELECT COUNT(*) FROM scratch_completions WHERE path=?', (path,)).fetchone()[0]
+            if count:
+                result['scratch_history'] = {'count': count, 'tool': 'board_read', 'entity': 'scratch', 'record_id': path}
+        return result
     if action not in ('deleted', 'observe'):
         raise BoardError('Use action=deleted, observe, reconcile or history')
     from .claims import covers

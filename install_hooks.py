@@ -34,7 +34,7 @@ def ours(handler):
     return 'swarmboard_hook.py' in command or any('swarmboard_hook.py' in str(arg) for arg in handler.get('args', []))
 
 
-def install(path, command, arguments=None, watch=False):
+def install(path, command, arguments=None, watch=False, expansion=False):
     saved = json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
     hooks = saved.setdefault('hooks', {})
     if not isinstance(hooks, dict):
@@ -50,9 +50,13 @@ def install(path, command, arguments=None, watch=False):
             if copy['hooks']:
                 kept.append(copy)
         hooks[event] = kept
-    for event, matcher in [('SessionStart', None), ('UserPromptSubmit', None),
-                           ('PreToolUse', 'Edit|Write|MultiEdit|NotebookEdit|apply_patch|Bash|exec_command'),
-                           ('PostToolUse', None), ('Stop', None), ('SessionEnd', None)]:
+    # Board tools pass PreToolUse so they stay denied until the user types /board.
+    events = [('SessionStart', None), ('UserPromptSubmit', None),
+              ('PreToolUse', 'Edit|Write|MultiEdit|NotebookEdit|apply_patch|Bash|exec_command|mcp__board__.*'),
+              ('PostToolUse', None), ('Stop', None), ('SessionEnd', None)]
+    if expansion:
+        events.append(('UserPromptExpansion', None))  # Claude reports typed slash commands here.
+    for event, matcher in events:
         entry = {'hooks': [{'type': 'command', 'command': command, 'timeout': 3 if event == 'SessionEnd' else 10}]}
         if arguments is not None:
             entry['hooks'][0]['args'] = arguments
@@ -89,7 +93,8 @@ def main():
         address = urlparse(url)
         if address.scheme != 'http' or address.hostname != '127.0.0.1' or not address.port or address.path not in ('', '/'):
             parser.error('Hook routing requires http://127.0.0.1:PORT')
-        local = Path(workspace) / '.codex/board-operator.json'
+        from board.runtime import ROUTE
+        local = Path(workspace) / ROUTE
         saved = json.loads(local.read_text(encoding='utf-8')) if local.exists() else {}
         if local.exists():
             shutil.copy2(local, local.with_name(local.name + '.swarmboard-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f') + '.bak'))
@@ -98,7 +103,8 @@ def main():
     for harness, config in [('codex', args.codex_config), ('claude', args.claude_config)]:
         argv = [sys.executable, str(Path(__file__).resolve().with_name('swarmboard_hook.py')), '--harness', harness]
         command = shell_command(argv, windows=sys.platform == 'win32')
-        install(config, argv[0] if harness == 'claude' else command, argv[1:] if harness == 'claude' else None, watch=harness == 'claude')
+        install(config, argv[0] if harness == 'claude' else command, argv[1:] if harness == 'claude' else None,
+                watch=harness == 'claude', expansion=harness == 'claude')
         print(f'Installed {harness} Swarmboard hooks: {config}')
 
 

@@ -36,12 +36,35 @@ class HubTests(unittest.TestCase):
 
     def test_any_hub_response_previews_only_callers_unread_inbox_without_ack(self):
         first = self.call(self.b, 'inbox_send', recipient_agent_id=self.a['agent_id'], body='Waiting for your reply')
-        self.call(self.a, 'inbox_send', recipient_agent_id=self.b['agent_id'], body='Private to B')
+        initial = self.call(self.a, 'inbox_send', recipient_agent_id=self.b['agent_id'], body='Private to B')
+        self.assertEqual(initial['inbox_preview'][0]['id'], first['id'])
         result = self.call(self.a, 'noticeboard_read')
-        self.assertEqual(result['inbox_preview'], [{'id': first['id'], 'sender': self.b['agent_id'], 'body': 'Waiting for your reply'}])
+        self.assertEqual(result['inbox_preview'], [])
         self.assertEqual(self.call(self.a, 'inbox_read')['unread_inbox'], 1)
         self.call(self.a, 'inbox_ack', message_ids=[first['id']])
-        self.assertNotIn('inbox_preview', self.call(self.a, 'board_status'))
+        self.assertEqual(self.call(self.a, 'board_status')['inbox_preview'], [])
+
+    def test_inbox_recipient_aliases_deliver_to_exact_id(self):
+        for field in ('recipient_agent_id', 'to', 'recipient'):
+            self.call(self.a, 'inbox_send', **{field:self.b['agent_id']}, body=field)
+        messages = self.call(self.b, 'inbox_read')['messages']
+        self.assertEqual([row['body'] for row in messages], ['recipient_agent_id','to','recipient'])
+
+    def test_invalid_recipient_arguments_never_insert_messages(self):
+        cases = [({}, 'Missing recipient_agent_id'), ({'to':None}, 'non-empty'),
+                 ({'recipient':[]}, 'non-empty'), ({'to':' '}, 'non-empty'),
+                 ({'to':self.a['agent_id'], 'recipient_agent_id':self.b['agent_id']}, 'Conflicting'),
+                 ({'to':'B'}, 'display names'), ({'to':'missing-id'}, 'Unknown recipient ID')]
+        for args, error in cases:
+            with self.subTest(args=args), self.assertRaisesRegex(BoardError,error):
+                self.call(self.a,'inbox_send',**args,body='must not deliver')
+        self.assertEqual(self.call(self.b,'inbox_read')['messages'], [])
+        self.assertEqual(self.call(self.a,'inbox_read')['messages'], [])
+
+    def test_recipient_alias_still_rejects_retired_agent(self):
+        self.call(self.b,'retire',reason='done')
+        with self.assertRaisesRegex(BoardError,'Recipient is retired'):
+            self.call(self.a,'inbox_send',to=self.b['agent_id'],body='rejected')
 
     def test_parent_child_conflict_but_siblings_allowed(self):
         self.call(self.a, "claim", paths=["src/editor"], reason="editing")
@@ -71,9 +94,9 @@ class HubTests(unittest.TestCase):
         self.assertEqual(self.call(self.b, "noticeboard_read")["posts"][0]["body"], "Database is being rebuilt")
         self.assertEqual(self.call(self.b, "inbox_ack", message_ids=[message["id"]])["unread_inbox"], 0)
 
-    def test_authentication_and_ack_ownership(self):
-        with self.assertRaises(BoardError):
-            self.hub.call("board_status", {"agent_id": self.a["agent_id"], "session_token": "wrong"})
+    def test_trusted_identity_and_ack_ownership(self):
+        for token in (None, 'wrong'):
+            self.hub.call('board_status', {'agent_id': self.a['agent_id'], 'session_token': token})
         message = self.call(self.a, "inbox_send", recipient_agent_id=self.b["agent_id"], body="hello")
         with self.assertRaises(BoardError):
             self.call(self.a, "inbox_ack", message_ids=[message["id"]])
@@ -99,7 +122,8 @@ class HubTests(unittest.TestCase):
         thread.start()
         url = f"http://127.0.0.1:{server.server_port}"
         entry = Path(__file__).resolve().parents[1] / "run_board.py"
-        processes = [subprocess.Popen([sys.executable, str(entry), "mcp", "--url", url, "--name", name],
+        processes = [subprocess.Popen([sys.executable, str(entry), "mcp", "--url", url, "--name", name,
+                     "--workspace", str(self.root), "--database", str(self.hub.database)],
                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', cwd=self.root)
                      for name in ["codex-probe", "claude-probe"]]
         def rpc(process, method, params=None):
@@ -116,11 +140,27 @@ class HubTests(unittest.TestCase):
             for process in processes:
                 initialized = rpc(process, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "probe", "version": "1"}})
                 self.assertEqual(initialized["serverInfo"]["name"], "swarmboard")
-                self.assertEqual(len(rpc(process, "tools/list")["tools"]), 29)
+                advertised = rpc(process, "tools/list")["tools"]
+                self.assertEqual(len(advertised), 36)
+                self.assertTrue({'board_identity', 'board_activity', 'job_post_and_claim', 'job_followup', 'board_read', 'job_delete'} <= {t['name'] for t in advertised})
             first, second = processes
             a = tool(first, "board_status")["your_agent_id"]
             b = tool(second, "board_status")["your_agent_id"]
             self.assertNotEqual(a, b)
+            unknown = rpc(first, 'tools/call', {'name': 'board_identity', 'arguments': {'agent_id': 'missing'}})
+            self.assertTrue(unknown['isError'])
+            self.assertIn('Unknown board agent ID', unknown['content'][0]['text'])
+            activity = tool(first, 'board_activity', {'action': 'update', 'title': 'Testing MCP'})
+            self.assertEqual(activity['activity']['title'], 'Testing MCP')
+            job = tool(first, 'job_post_and_claim', {'title': 'MCP test', 'description': 'Integration', 'acceptance': 'Pass', 'kind': 'noncode'})['job']
+            followup = tool(first, 'job_followup', {'job_id': job['id'], 'lease_token': job['lease_token'], 'request': 'Exercise follow-up delivery'})
+            self.assertEqual(followup['job']['followups'][0]['request'], 'Exercise follow-up delivery')
+            detail = tool(first, 'board_read', {'entity': 'jobs', 'record_id': job['id']})
+            self.assertEqual(json.loads(detail['content'])['id'], job['id'])
+            tool(first, 'job_finish', {'job_id': job['id'], 'lease_token': job['lease_token'], 'summary': 'New MCP tools exercised',
+                 'checks': [{'command': 'MCP integration', 'result': 'passed', 'evidence': 'Activity and follow-up round trips passed'}]})
+            deleted = tool(first, 'job_delete', {'job_id': job['id'], 'reason': 'Temporary integration job completed'})
+            self.assertTrue(deleted['history_preserved'])
             unicode_message = tool(first, 'inbox_send', {'recipient_agent_id': b, 'body': 'Unicode patch context: 日本語 🐝'})
             self.assertIn('日本語 🐝', tool(second, 'inbox_read')['messages'][0]['body'])
             tool(second, 'inbox_ack', {'message_ids': [unicode_message['id']]})
@@ -137,7 +177,7 @@ class HubTests(unittest.TestCase):
             owned = tool(first, 'job_claim', {'job_id': posted['id']})['job']
             self.assertFalse(tool(second, 'job_claim', {'job_id': posted['id']})['accepted'])
             tool(first, 'job_update', {'job_id': posted['id'], 'lease_token': owned['lease_token'], 'progress': 'Probe checks passed'})
-            self.assertIn("inbox_reminder", tool(second, "board_status"))
+            self.assertEqual(tool(second, "board_status")["unread_inbox"], 1)
             transferred = tool(second, "takeover", {"target_agent_id": a, "reason": "First probe is dead"})
             resumed = transferred['jobs'][0]
             done = tool(second, 'job_finish', {'job_id': posted['id'], 'lease_token': resumed['lease_token'], 'summary': 'Probe finished',
@@ -145,9 +185,14 @@ class HubTests(unittest.TestCase):
             self.assertEqual(done['job']['state'], 'DONE')
             retired = rpc(first, "tools/call", {"name": "board_status"})
             self.assertTrue(retired["isError"])
+            selected = tool(first, 'board_identity', {'agent_id': a})
+            self.assertEqual(selected['your_agent_id'], a)
+            self.assertFalse(selected['work_transferred'])
+            self.assertNotIn('session_token', selected)
+            self.assertEqual(tool(first, 'board_status', {'target_agent_id': 'self'})['claims'], [])
             self.assertEqual(tool(second, "inbox_ack", {"message_ids": [message["id"]]})["unread_inbox"], 0)
             tool(second, "release", {"claim_ids": [files[0]["id"]], "held_reason": "Awaiting validation"})
-            self.assertIn("custody_reminder", tool(second, "board_status"))
+            self.assertEqual(tool(second, "board_status")["custody"][0]["state"], "HELD")
             tool(second, "custody_resolve", {"paths": ["src"], "commit_hash": "abcdef0"})
             self.assertNotIn("custody_reminder", tool(second, "board_status"))
             unfinished = tool(second, 'job_post', {'title': 'Unfinished probe', 'description': 'Recovery simulation', 'acceptance': 'Probe passes'})['job']

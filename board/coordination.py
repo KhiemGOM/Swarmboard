@@ -98,7 +98,7 @@ def dispatch(hub, db, p, agent, now):
         after, limit = p.get('after_id', 0), p.get('limit', 5)
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 10:
             raise BoardError('history after_id must be nonnegative and limit must be 1 to 10')
-        records = [dict(row) for row in db.execute('SELECT id,kind,reporter,evidence,created FROM coordination_incidents WHERE path=? AND id>? ORDER BY id LIMIT ?', (path, after, limit))]
+        records = [dict(row) for row in db.execute('SELECT id,kind,reporter,evidence,created FROM coordination_incidents WHERE path=? AND id>? ORDER BY id LIMIT ?', (path, after, limit + 1))]
         for record in records:
             try:
                 record['evidence'] = json.loads(record['evidence'])

@@ -30,7 +30,14 @@ def enrich(db, agents):
             'SELECT state,COUNT(*) AS n FROM jobs WHERE owner=? GROUP BY state', (ident,))}
         agent['current_jobs'] = [dict(row) for row in db.execute(
             "SELECT id,title,kind,state,expires,progress,updated FROM jobs WHERE owner=? AND state='CLAIMED' ORDER BY id", (ident,))]
-        # Neither the model nor whether inference is running is reported by the harness.
+        label = db.execute('SELECT title,description,updated FROM agent_activity WHERE agent=?', (ident,)).fetchone() if 'agent_activity' in tables else None
+        native = db.execute('SELECT harness,session_key,awake,event,updated FROM native_activity WHERE agent=?', (ident,)).fetchone() if 'native_activity' in tables else None
+        agent['activity'] = dict(label) if label else None
+        agent['native_activity'] = dict(native) if native else None
+        # Hook observations are authoritative; last contact and labels are not liveness.
         agent['model'] = None
         activity = binding['activity'] if binding and 'activity' in binding.keys() else 'unknown'
-        agent['running'] = {'busy': True, 'idle': False}.get(activity)
+        awake = bool(native['awake']) if native else {'busy': True, 'idle': False}.get(activity)
+        if agent['state'] != 'active' or agent.get('disconnected') is not None:
+            awake = False
+        agent['awake'] = agent['running'] = awake

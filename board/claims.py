@@ -52,6 +52,16 @@ def dispatch(hub, db, method, p, agent, now):
         reason = p.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise BoardError("A claim reason is required")
+        if type(p.get('partial', False)) is not bool:
+            raise BoardError('partial must be a boolean; default false preserves atomic claims')
+        if p.get('partial'):
+            results = []
+            for kind, path in entities:
+                item = dispatch(hub, db, method, {**p, 'partial': False, 'paths': [path] if kind == 'file' else [],
+                                'resources': [path] if kind == 'resource' else []}, agent, now)
+                results.append({'kind': kind, 'path': path, **item})
+            return {'accepted': all(r['accepted'] for r in results), 'partial': True, 'results': results,
+                    'claim_ids': [i for r in results if r['accepted'] for i in r['claim_ids']]}
         from .coordination import hot_files
         hot = [file for file in (hot_files(hub) if files else []) if any(kind == 'file' and hub.overlaps(path, file) for kind, path in entities)]
         # Grandfather existing claims without allowing a new enclosing folder claim.
@@ -126,7 +136,9 @@ def dispatch(hub, db, method, p, agent, now):
         if held is not None and (not isinstance(held, str) or not held.strip()):
             raise BoardError("held_reason must explain unfinished work and your handoff plan")
         if any(r["kind"] == "file" for r in rows) and sha is None and held is None:
-            raise BoardError("File release requires commit_hash or held_reason; custody cannot silently disappear")
+            from .custody_policy import ignored
+            if not all(ignored(hub, r['path']) for r in rows if r['kind'] == 'file'):
+                raise BoardError("File release requires commit_hash or held_reason; ignored untracked scratch may complete without a commit")
         reason = p.get("reason", "")
         if not sha and not held and (not isinstance(reason, str) or not reason.strip()):
             raise BoardError("Resource release requires a reason, such as tests finished")
@@ -139,9 +151,14 @@ def dispatch(hub, db, method, p, agent, now):
                         db.execute("UPDATE custody SET owner=?,state=?,reason=?,commit_hash=?,updated=? WHERE path=?",
                                    (agent, "COMMITTED" if sha else "HELD", held or "Commit evidence recorded", sha, now, path))
         hub.event(db, "released", agent, {"claim_ids": ids, "commit_hash": sha, "held_reason": held, "reason": reason})
-        return {"released": ids, "commit_hash": sha, "held_reason": held}
+        from .custody_policy import close
+        closed = close(hub, db, agent, now)
+        return {"released": ids, "commit_hash": sha, "held_reason": held, 'scratch_completed': closed}
     if method == "custody_resolve":
-        sha = commit(p.get("commit_hash"))
+        scratch = p.get('completion', 'commit') == 'scratch'
+        if p.get('completion', 'commit') not in ('commit', 'scratch'):
+            raise BoardError('completion must be commit or scratch')
+        sha = None if scratch else commit(p.get("commit_hash"))
         values = p.get("paths")
         if not isinstance(values, list) or not values:
             raise BoardError("paths must identify your held custody records")
@@ -150,6 +167,9 @@ def dispatch(hub, db, method, p, agent, now):
             row = db.execute("SELECT owner,state FROM custody WHERE path=?", (path,)).fetchone()
             if not row or row["owner"] != agent or row["state"] != "HELD":
                 raise BoardError("Only the custodian can resolve their HELD records; active work must use release")
+        if scratch:
+            from .custody_policy import close
+            return {'resolved': close(hub, db, agent, now, paths, strict=True), 'completion': 'scratch'}
         for path in paths:
             db.execute("UPDATE custody SET state='COMMITTED',commit_hash=?,reason='Commit evidence recorded',updated=? WHERE path=?", (sha, now, path))
         hub.event(db, "custody_resolved", agent, {"paths": paths, "commit_hash": sha})

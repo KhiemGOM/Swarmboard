@@ -44,23 +44,33 @@ def invalidate(db, target, now, reason, successor=None):
         db.execute('UPDATE desktop_wake_bindings SET enabled=0 WHERE agent=?', (target,))
 
 
-def reconnect(hub, db, p, agent, now):
-    old_id = p.get('target_agent_id')
-    old = db.execute('SELECT * FROM agents WHERE id=?', (old_id,)).fetchone()
-    if not old or not secrets.compare_digest(old['token'], str(p.get('target_session_token', ''))):
-        raise BoardError('Native reconnect predecessor is no longer valid; no automatic takeover')
-    harness, key = p.get('harness'), p.get('session_key')
-    canonical = db.execute('SELECT agent FROM native_sessions WHERE harness=? AND session_key=?', (harness, key)).fetchone()
-    if canonical and canonical[0] != old_id:
-        raise BoardError('Native reconnect no longer belongs to the same chat')
-    owner = None
+def identify(db, harness, key, agent):
+    """Accept an explicit local identity declaration; never transfer its work."""
+    initialize(db)
+    db.execute('DELETE FROM native_sessions WHERE harness=? AND (session_key=? OR agent=?)', (harness, key, agent))
+    db.execute('INSERT INTO native_sessions VALUES (?,?,?)', (harness, key, agent))
     if db.execute("SELECT 1 FROM sqlite_master WHERE name='hook_inbox_bindings'").fetchone():
-        owner = db.execute('SELECT session_key FROM hook_inbox_bindings WHERE harness=? AND agent=?', (harness, old_id)).fetchone()
-    native = None
+        db.execute('DELETE FROM hook_inbox_bindings WHERE harness=? AND (session_key=? OR agent=?)', (harness, key, agent))
+        db.execute('INSERT INTO hook_inbox_bindings VALUES (?,?,?)', (harness, agent, key))
     if harness == 'codex' and db.execute("SELECT 1 FROM sqlite_master WHERE name='desktop_wake_bindings'").fetchone():
-        native = db.execute('SELECT thread_id FROM desktop_wake_bindings WHERE agent=?', (old_id,)).fetchone()
-    if not (owner and owner[0] == key) and not (native and native[0] == p.get('native_session_id')):
-        raise BoardError('Native reconnect no longer belongs to the same chat')
+        import hashlib
+        for bound, thread in db.execute('SELECT agent,thread_id FROM desktop_wake_bindings').fetchall():
+            same_chat = hashlib.sha256(('codex:'+thread).encode()).hexdigest() == key
+            if (bound == agent and not same_chat) or (bound != agent and same_chat):
+                db.execute('DELETE FROM desktop_wake_bindings WHERE agent=?', (bound,))
+
+
+def reconnect(hub, db, p, agent, now):
+    harness, key = p.get('harness'), p.get('session_key')
+    if key is not None:
+        import re
+        if harness not in ('codex', 'claude', 'claude-code', 'claude-desktop') or not isinstance(key, str) or not re.fullmatch('[0-9a-f]{64}', key):
+            raise BoardError('Invalid native session key; use target_agent_id alone to resume by board ID')
+    canonical = db.execute('SELECT agent FROM native_sessions WHERE harness=? AND session_key=?', (harness, key)).fetchone() if key else None
+    old_id = canonical[0] if canonical else p.get('target_agent_id')
+    old = db.execute('SELECT * FROM agents WHERE id=?', (old_id,)).fetchone()
+    if not old:
+        raise BoardError('Native reconnect identity no longer exists')
     busy = (db.execute('SELECT 1 FROM claims WHERE agent=? AND active=1', (agent,)).fetchone()
             or db.execute("SELECT 1 FROM custody WHERE owner=? AND state!='COMMITTED'", (agent,)).fetchone()
             or db.execute("SELECT 1 FROM jobs WHERE owner=? AND state='CLAIMED'", (agent,)).fetchone()
@@ -69,7 +79,8 @@ def reconnect(hub, db, p, agent, now):
             or db.execute('SELECT 1 FROM messages WHERE recipient=? AND acknowledged IS NULL', (agent,)).fetchone())
     if busy and agent != old_id:
         raise BoardError('Reconnect provisional identity already owns work or inbox; reconcile before changing identity')
-    bind(db, harness, key, old_id)
+    if key:
+        identify(db, harness, key, old_id)
     if agent != old_id:
         invalidate(db, agent, now, 'Same native chat reconnected to existing identity', old_id)
     token = secrets.token_urlsafe(32) if old['state'] == 'retired' else old['token']

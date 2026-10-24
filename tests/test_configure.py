@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from board.configure import configure, connection_text
 from board.core import BoardError
+from boardctl import operator_connection
+from types import SimpleNamespace
 
 
 class ConfigureTests(unittest.TestCase):
@@ -94,6 +96,24 @@ class ConfigureTests(unittest.TestCase):
         self.assertEqual(text.count('[mcp_servers.board]'), 1)
         with self.assertRaisesRegex(BoardError, 'Port must be'):
             self.switch(port=0)
+
+    def test_operator_uses_complete_project_route_without_global_defaults(self):
+        local = self.root / '.codex' / 'board-operator.json'
+        local.parent.mkdir()
+        local.write_text(json.dumps({'workspace':str(self.root),'database':str(self.database),'port':4318}))
+        args = SimpleNamespace(config=None,workspace=str(self.root),database=None,port=None)
+        workspace, database, port = operator_connection(args)
+        self.assertEqual((workspace,database,port),(self.root,self.database,4318))
+
+    def test_operator_rejects_missing_or_cross_project_explicit_config(self):
+        args = SimpleNamespace(config=self.root/'missing.json',workspace=None,database=None,port=None)
+        with self.assertRaisesRegex(BoardError,'existing'):
+            operator_connection(args)
+        self.operator.write_text(json.dumps({'workspace':str(self.root),'database':str(self.database),'port':4318}))
+        args.config=self.operator
+        args.workspace=str(self.root/'other')
+        with self.assertRaisesRegex(BoardError,'mixed project'):
+            operator_connection(args)
 
 
 if __name__ == '__main__':

@@ -33,6 +33,53 @@ class JobTests(unittest.TestCase):
     def evidence(self):
         return [{'command': 'python -m unittest tests.test_bug', 'result': 'passed', 'evidence': '1 regression test passed for abcdef0'}]
 
+    def test_post_and_claim_is_owned_atomic_and_validates_before_insert(self):
+        before = self.call(self.a, 'job_list', state='ALL')['jobs']
+        for duration in (0, True, 7201):
+            with self.assertRaises(BoardError):
+                self.call(self.a, 'job_post_and_claim', title='Fix', description='Bug', acceptance='Pass', ttl_seconds=duration)
+        self.assertEqual(self.call(self.a, 'job_list', state='ALL')['jobs'], before)
+        response = self.call(self.a, 'job_post_and_claim', title='Fix', description='Bug', acceptance='Pass', ttl_seconds=60)
+        job = response['job']
+        self.assertTrue(response['accepted'])
+        self.assertIn('activity_reminder', response)
+        self.assertEqual(job['owner'], self.a['agent_id'])
+        self.assertEqual(job['state'], 'CLAIMED')
+        self.assertTrue(job['lease_token'])
+        self.assertFalse(self.call(self.b, 'job_claim', job_id=job['id'])['accepted'])
+        self.assertEqual(self.call(self.a, 'board_status')['claims'], [])
+        self.assertNotIn('lease_token', self.call(self.b, 'job_list')['jobs'][0])
+
+    def test_post_and_claim_rolls_back_if_transaction_fails(self):
+        from unittest.mock import patch
+        with patch.object(self.hub, 'event', side_effect=RuntimeError('failed event')):
+            with self.assertRaises(RuntimeError):
+                self.call(self.a, 'job_post_and_claim', title='Fix', description='Bug', acceptance='Pass')
+        self.assertEqual(self.call(self.a, 'job_list', state='ALL')['jobs'], [])
+
+    def test_followup_stays_inside_job_and_reopens_done_with_new_lease(self):
+        job = self.claim(self.a, self.post())
+        with self.assertRaises(BoardError):
+            self.call(self.a, 'job_followup', job_id=job['id'], request='Extra case', lease_token='wrong')
+        with self.assertRaises(BoardError):
+            self.call(self.b, 'job_followup', job_id=job['id'], request='Overlap', lease_token=job['lease_token'])
+        updated = self.call(self.a, 'job_followup', job_id=job['id'], request='Handle empty input', lease_token=job['lease_token'])['job']
+        self.assertEqual(updated['followups'][0]['request'], 'Handle empty input')
+        self.assertEqual(updated['lease_token'], job['lease_token'])
+        self.finish(self.a, job, commit_hash='abcdef0', checks=self.evidence())
+        reopened = self.call(self.b, 'job_followup', job_id=job['id'], request='Also handle whitespace')['job']
+        self.assertEqual(reopened['id'], job['id'])
+        self.assertEqual(reopened['state'], 'CLAIMED')
+        self.assertNotEqual(reopened['lease_token'], job['lease_token'])
+        self.assertEqual(reopened['followups'][-1]['previous_completion']['commit_hash'], 'abcdef0')
+        self.assertEqual(reopened['followups'][-1]['previous_completion']['owner'], self.a['agent_id'])
+        self.assertEqual(reopened['owner'], self.b['agent_id'])
+        self.assertIsNone(reopened['commit_hash'])
+        with self.assertRaises(BoardError):
+            self.finish(self.a, job, commit_hash='abcdef1', checks=self.evidence())
+        self.hub = Hub(self.root / 'hub.sqlite', self.root)
+        self.assertEqual(len(self.call(self.a, 'job_list')['jobs'][0]['followups']), 2)
+
     def test_claim_is_atomic_and_does_not_acquire_file_locks(self):
         job = self.post()
         gate = threading.Barrier(2)
@@ -125,7 +172,7 @@ class JobTests(unittest.TestCase):
         self.assertNotIn('lease_token', self.call(self.b, 'job_list')['jobs'][0])
         with self.assertRaises(BoardError):
             self.finish(self.b, job, commit_hash='abcdef0', checks=self.evidence())
-        self.assertIn('job_reminder', self.call(self.a, 'noticeboard_read'))
+        self.assertEqual(self.call(self.a, 'noticeboard_read')['owned_jobs_count'], 1)
         self.assertNotIn('job_reminder', self.call(self.b, 'board_status'))
 
     def test_rejects_invalid_post_and_ttl_without_mutation(self):

@@ -39,13 +39,14 @@ codex mcp add board -- /absolute/path/to/python /absolute/path/to/swarmboard/run
 
 `--autostart` starts the daemon on connection; `--workspace` verifies the hub's
 workspace before registration. Add `--url http://127.0.0.1:PORT` for another port.
-Without `--workspace`, the bridge uses its launch working directory. Keep the
-shared Codex and Claude Code configurations free of workspace, database, URL and fixed `cwd`.
-It finds the nearest configured ancestor, preferring `.codex/board-operator.json`
-over `.board/operator.json` within that directory.
-A saved workspace or database mismatch is refused before registration. With no
-local selection, state is `.board/hub.sqlite` and the port is derived consistently
-from the workspace path. An occupied port belonging to another project is refused;
+Without `--workspace`, each call is routed by the calling chat's folder (see
+"Per-chat routing" below). Keep the shared Codex and Claude Code configurations
+free of workspace, database, URL and fixed `cwd`. The route file is
+`.board/operator.json` in the nearest configured ancestor; a folder with no route
+above it has no board, and nothing is created there until the user types `/board`.
+A saved workspace or database mismatch is refused before registration. A new
+route stores state in `.board/hub.sqlite` with a port derived consistently from
+the workspace path. An occupied port belonging to another project is refused;
 configure a free port locally. Existing local selections preserve their database
 and port. Reload connections after changing saved configs.
 
@@ -60,7 +61,7 @@ Use `-Database` / `--database` to retain an existing board; otherwise the select
 workspace gets `.board/hub.sqlite`. Choose a distinct port while another board
 is running. The command rejects a database or reachable hub belonging to another
 workspace, backs up the Codex and operator configurations, preserves unrelated
-MCP connections and board approval settings, and saves defaults in the selected project's `.codex/board-operator.json`.
+MCP connections and board approval settings, and saves defaults in the selected project's `.board/operator.json`.
 By default it writes that project's `.codex/config.toml`, leaving the shared global
 configuration alone. `-McpConfig` / `--mcp-config` explicitly overrides the target file.
 It does not register an agent or start a hub; MCP starts the hub after reconnecting.
@@ -70,9 +71,11 @@ remain separately configured through the installer or `claude mcp add`.
 
 Example JSON/TOML configs live in `examples/`; replace their placeholders.
 Claude Desktop's local Code sessions share Claude Code's user registration.
-Do not also define `board` in `claude_desktop_config.json`: Desktop prefers that
-definition in local Code chats, bypassing the per-session Code connection.
-The installer removes that duplicate while preserving unrelated servers.
+Do not also define `board` in any `claude_desktop_config.json`: Desktop runs that
+definition once and shares it between all local Code chats, bypassing the
+per-session Code connection. The installer removes that duplicate from every
+profile, including `~/ClaudeProfiles/*/`, while preserving unrelated servers;
+restart Claude Desktop afterwards.
 Use Swarmboard in Desktop's Code tab; standalone Chat coordination is not supported.
 Its Developer MCP list uses a separate config: add the same command and args
 under `mcpServers` there to expose it in that list.
@@ -91,7 +94,8 @@ at the same path.
 
 ## Agent flow
 
-1. Connect: register an ID and receive coordination instructions.
+1. Opt in: the user types `/board` (Codex: `$board`). The first board tool call
+   registers an ID and returns coordination instructions.
 2. Read `board_status`, notices and your inbox; confirm the workspace.
 3. Claim the smallest concrete paths before editing. Proceed only on
    `accepted=true`. On conflict contact the holder or choose other work.
@@ -153,14 +157,37 @@ file leases for recovery. A late hook with an obsolete connection token cannot
 disconnect a resumed chat. MCP EOF is an additional disconnect fallback; abrupt
 process termination may skip both, so session end is not proof of permanent death.
 
+## Agent activity
+
+`board_activity` updates your current-work label at any time (`action=update`,
+`title`, optional `description`); `status` reads it and `clear` removes it.
+The title is capped at 60 characters and description at 120. Keep them tiny:
+"Fixing hooks", "Running tests". Stale labels persist and are fine. Successful
+job claims remind the agent to update its label. Labels never set liveness.
+`board_status` exposes `activity`, `awake` and the native activity event/time.
+Native Codex and Claude hooks alone record awake/idle; disconnected or retired
+agents are idle, and missing native evidence stays unknown (`null`).
+
 ## Job board
 
-Post work through MCP `job_post` or the CLI. Every job has a title, description
+Before starting work beyond a few edits, you MUST own a job, including for your
+own human-assigned task. Reuse a relevant owned job or post and claim one.
+`job_post_and_claim` creates and reserves it atomically; reuse an existing job
+when it already covers the work. `job_post` offers work to others or the CLI. Every job has a title, description
 and acceptance criteria. Jobs share information about authorized work; they do
 not grant permission to expand the owner's scope. A worker reserves an OPEN job
 with `job_claim`, then obtains separate file/resource locks. One worker wins
 concurrent claims. Save the returned `lease_token`: updates, handoff and completion
 require this token, preventing an expired worker from finishing a reassigned job.
+
+Related follow-up requests go **inside the same job** with `job_followup`:
+`job_id`, `request`, and the current `lease_token` while CLAIMED. The request is
+stored in a dedicated `followups` history. Adding a
+follow-up to a DONE job atomically reserves the same job for you with a fresh lease, and
+previous completion evidence is preserved in that history. File/resource locks
+are unaffected. Claim OPEN work normally first. Distinct new work gets a new
+job. Activity labels describe current work only; they are never request records.
+Keep bookkeeping concise and update progress only at useful milestones.
 
 The default job lease is 30 minutes (maximum two hours). `job_update` saves progress
 and renews it; no background renewal silently holds work indefinitely. `job_yield`
@@ -174,7 +201,7 @@ log/artifact references, or why a check does not apply). Failed checks cannot
 finish a job. Records persist alongside the reported commit; Swarmboard does not
 execute arbitrary commands or independently certify the commit or test evidence.
 
-Finish when the original acceptance criteria and repository commit policy are
+Finish when acceptance criteria, authorized follow-ups and repository commit policy are
 met. There is no need to wait for user silence. A topic change does not imply
 completion or authorize a commit. Additional work can be posted separately with
 `parent_job_id` linking it to the original job.
@@ -347,6 +374,49 @@ commit smaller coherent pieces. Reclaim/release/retirement/inheritance preserve
 the unresolved timestamp. Migrated records start from their last known update;
 older history cannot be reconstructed. Recorded commit evidence ends that debt.
 
+### Extended JSON wait conditions
+
+Use `board_wait action=subscribe, kind=condition` with a `condition` object.
+For example, wait until at most one lock remains:
+
+```json
+{"action":"subscribe","kind":"condition","condition":{"kind":"locks","remaining_lte":1}}
+```
+
+Wait until all locks except `git:index` clear:
+
+```json
+{"action":"subscribe","kind":"condition","condition":{"kind":"locks","exclude_resources":["git:index"]}}
+```
+
+Lock leaves count active file/resource claims and unfinished queue batches
+(one per batch, not per participant). HELD custody is history, not a lock.
+`remaining_lte` defaults to zero. Filters include `lock_types` (`file`, `resource`,
+`queue`), `path` (overlapping file/folder/queue locks), `resources` (exact resource
+IDs), and `owner` (`self` or an exact agent ID). Path/resource selectors form a
+union; other filters narrow it. `claim_ids`/`batch_ids` select specific recorded
+locks; `exclude_claim_ids`/`exclude_batch_ids` exclude specific ones. Empty ID
+lists select no locks. Names are not IDs.
+
+Default `scope=dynamic` checks matching locks at evaluation time, including new
+ones. `scope=snapshot` freezes the current matching claim/batch IDs when subscribing;
+later locks do not delay it, and transferring a tracked claim does not release it.
+The `self` owner filter follows an inherited subscription to its successor.
+
+Combine leaves using `{"all":[...]}` (AND) or `{"any":[...]}` (OR). Other leaves
+are `{"kind":"message_ack","message_id":123}` (a message you sent),
+`{"kind":"patch_finalized","batch_id":12}` (APPLIED or BLOCKED), and
+`{"kind":"job_state","job_id":3,"state":"DONE"}` (OPEN/CLAIMED/DONE).
+These generic combinations emit their own single notification; a participant
+may separately receive its mandatory patch-finalization message.
+
+Conditions are limited to 64 nodes, depth 6, 100 entries per selector and 8000
+characters after normalization. Snapshots hold at most 100 locks per leaf.
+Already satisfied conditions fire immediately. Existing timeout/cancel,
+durable deduplication and idle-only Codex inbox wake behavior apply. The worker
+evaluates JSON without invoking a model or executing user code. Availability
+remains a snapshot, not a reservation. List waits with `limit`/`after_id`.
+
 ### Focused queries
 
 `board_status` supports focused MCP queries:
@@ -357,17 +427,17 @@ desktop wake configuration and last delivery, unread inbox count, owned job coun
 and current jobs with progress/lease expiry. These details are visible to other
 agents on the same workspace board. Native session keys are stored hashes;
 Claude's raw session ID is not stored here. Unbound agents have empty bindings.
-Model is `null`. Running status follows Codex native hook activity (`true` for
+Model is `null`. Running/awake status follows native Codex and Claude hook activity (`true` for
 busy, `false` for idle, `null` for unknown); its source event/time is included in
-the wake binding. Registration/last contact does not prove liveness. Session
+native_activity (legacy Codex wake bindings remain a fallback). Registration/last contact does not prove liveness. Session
 tokens, inheritance credentials and job/delivery mutation tokens remain credentials,
 rather than discovery metadata. Use `target_agent_id` to inspect one agent when a
 workspace-wide response is too large.
 
 Tool responses are capped at **24,000 JSON characters** (Unicode is counted
-without ASCII escaping). Oversized hub results return `RESPONSE_TOO_LARGE`,
-with narrowing instructions, rather than a partial result. The call rolls back
-before committing mutations. For status, use `target_agent_id`, concrete `paths`
+without ASCII escaping). Reads return size-bounded pages with continuation cursors; oversized individual
+records expose explicit `_detail` references for full `board_read` chunks.
+Oversized mutation results return `RESPONSE_TOO_LARGE` and roll back before commit. For status, use `target_agent_id`, concrete `paths`
 or `resources`, and `include_rules=false`. For `noticeboard_read`, `inbox_read`
 and `job_list`, reduce `limit` (1–100) and page with `after_id` set to the last
 returned ID. Inbox reads never acknowledge messages. Job reminders show up to
@@ -419,10 +489,10 @@ This works when Codex's outer launcher is CMD or PowerShell. Claude uses its
 direct executable/args form. These are different launch formats; a successful
 direct Python or PowerShell-only run does not verify a Codex CMD shell hook.
 
-`SessionStart` reinforces the routine. `UserPromptSubmit` and every supported
+`UserPromptSubmit` and every supported
 `PostToolUse` inject unread inbox previews into model context once the session
-has linked through a native board MCP call. Unlinked sessions receive an explicit
-reminder instead of silently skipping delivery. Every hub response also includes
+has linked through a native board MCP call. Chats that have not typed `/board`
+get no board context at all (see Opt-in activation below). Every hub response also includes
 up to three unread message previews (1000 characters each) as a fallback, even
 without working native hooks. Preview delivery never acknowledges a message.
 
@@ -591,7 +661,7 @@ do not reuse another workspace's saved database. A missing/mismatched database
 is refused before retirement; no empty board is silently created. The local
 operator is trusted, just like other local processes with access to this database.
 
-Job tools: `job_post`, `job_list`, `job_claim`, `job_update`, `job_yield`,
+Job tools: `job_post_and_claim`, `job_post`, `job_list`, `job_claim`, `job_followup`, `job_update`, `job_yield`,
 `job_finish`. CLI also offers `heartbeat` and `disconnect`.
 
 `job_list` defaults to live jobs (`OPEN` and `CLAIMED`). Use `state=DONE` for
@@ -629,8 +699,8 @@ Optional checks:
 
 Claims are authoritative inside the hub. Check-before-edit remains cooperative;
 optional command hooks add guardrails, not OS-level write protection. The hub assumes
-trusted local processes: registration is open, and session tokens prevent
-accidental identity mixing rather than hostile local access. Takeover does not
+trusted local processes: registration and ID-only recovery are open. Session
+tokens only fence stale connection-close callbacks. Takeover does not
 independently verify death.
 
 MCP revisions supported: 2024-11-05, 2025-03-26, 2025-06-18 and 2025-11-25.
@@ -686,5 +756,173 @@ configured parent when running from a subfolder). They never use the Swarmboard
 checkout as a project default. Unconfigured projects are ignored without creating
 a database or agent. `python install_hooks.py` installs automatic hooks for both
 harnesses; optional `--workspace/--database/--url` save the selection in that
-project's `.codex/board-operator.json`, never in the global hook command. Legacy
+project's `.board/operator.json`, never in the global hook command. Legacy
 explicitly scoped hook invocations remain supported.
+
+
+## Quiet hooks and bounded reads (0.9.0)
+
+Inbox previews are delivered once per message across MCP and native hooks; delivery
+never acknowledges a message. Custody/job/patch prose repeats on state changes or
+Stop, while counts remain available. The shell-claims explanation appears once per
+native session; concrete missing-lock errors remain actionable. Preview-server
+warnings are not emitted by Swarmboard.
+
+List reads default to ten entries and also respect the 24,000-character cap.
+Follow `next_after_id` while `has_more` is true. Status pages each section separately:
+pass `next_cursor` unchanged with the same filters. These are live snapshots, so
+concurrent changes may shift pages; a page is never a lock reservation. Oversized
+records return an explicit `_detail` reference. `board_read` provides the full
+record as JSON-text chunks: concatenate `content` while advancing `next_offset`.
+Wait lists and file/coordination histories also use bounded pages. Mutation results
+remain strict: an oversized mutation response rolls its transaction back.
+
+`inbox_send` requires `body`; `inbox_ack` requires `message_ids`. `job_finish`
+accepts one check shape: `{"command":"python -m unittest","result":"passed","evidence":"Tests passed"}`.
+Use `not_applicable` with an explanation in `evidence` when appropriate. Validation
+errors name the missing field. `claim partial=true` explicitly permits per-entity
+results; inspect each `results[].accepted`. The default claim remains atomic.
+
+Ignored, untracked scratch custody closes after release, or on status/cleanup,
+without fabricating commit evidence. Active overlapping locks, tracked descendants
+and unfinished patches prevent closure. `custody_resolve completion=scratch`
+provides an explicit verified path. Completion preserves an audit exposed by
+`board_file action=history` and its `scratch_history` reference; files are not deleted.
+
+`job_delete` removes an obsolete job from live lists and retains its title,
+requests, evidence and deletion reason. Use `state=DELETED` or `ALL` for history.
+The creator/current/previous owner may delete; live CLAIMED work requires its current
+owner and lease token. Locks and custody are unchanged. Age never automatically
+cancels work.
+
+`board_info` and health expose a persistent `database_id`. Connections check both
+workspace and database identity, preventing same-workspace/wrong-database routing.
+A normal restart retains IDs and credentials. Hook identity failures now name the
+configured hub/database; retirement fencing remains in force.
+
+
+## Per-chat routing, cleanup and reset (0.12.0)
+
+A board connection may be shared by several chats: Claude Desktop runs a `board`
+server from `claude_desktop_config.json` once for every local Code chat. Earlier
+bridges kept one identity and workspace in memory, so chats acted as each other.
+Now nothing about "the current chat" lives in the bridge:
+
+- Each board call carries `_route` (harness, native session ID, folder), written
+  by the `PreToolUse` hook from the harness payload. It overwrites any value the
+  model supplied. Without a hook-written route, a bridge uses its own process's
+  session and folder; a Claude bridge that has neither refuses with `SHARED_BRIDGE`.
+- The board is the nearest `.board/operator.json` above that folder. A route file
+  naming another workspace is stale: it is skipped while searching upward and
+  refused when named directly. `.codex/board-operator.json` is still read until
+  `/board` migrates it.
+- The identity is the hub's binding for that native chat. Two chats never share
+  one, and the same chat keeps one across bridges. The `native-reconnect` cache and
+  hook token checks are gone. If a board is wiped under a bridge, its next call
+  re-registers.
+
+Typing `/board` also normalizes the project. It writes the canonical route file at
+the nearest configured or git root, migrating database and port from a legacy
+route, and replaces a stale copy. It deletes `.codex/board-operator.json`, the
+reconnect cache and hook-session files older than 14 days. In Claude it warns
+about any Desktop config that still defines `board`.
+
+The hub prunes history older than 14 days at startup and hourly: events, acknowledged
+messages, notices, done or deleted jobs, released claims, committed custody,
+finished patch batches, settled wake deliveries, and departed agents with no live
+work. Open jobs, active claims, unread messages and unfinished custody are never
+pruned.
+
+`/board reset` (Codex: `$board reset`) wipes the project's whole board through
+the `board_reset` tool, keeping only the workspace and database identity. The hook
+denies that tool unless the user typed `/board reset` in this chat in the prompt
+that asked for it, and it works once per request. Files on disk are untouched.
+
+`/board rename [TITLE]` (alias `/board title`) renames a Claude chat right away
+instead of waiting for the work title to change: with TITLE it uses that text,
+otherwise the owned job title, else the activity title. It overrides a manual
+rename; explicit text lasts until the job or activity title changes. Codex threads
+have no hook-settable title, so the hook only replies with a note there.
+
+## Opt-in activation and chat titles (0.11.0)
+
+Board integration is off in every chat until the user types `/board` (Codex:
+`$board`, with or without arguments). Until then the repository behaves normally:
+no join nudges, no claim or job enforcement, and the MCP bridge registers no agent
+just by connecting. It contacts the hub and registers on the first board tool call,
+so idle chats no longer appear in `board_status`.
+
+Claude reports typed slash commands through `UserPromptExpansion`; the
+`UserPromptSubmit` prompt text is the fallback, and the only one for Codex. Only a
+prompt that starts with `/board` or `$board` counts; text the model writes, other
+commands and lookalikes such as `/boardgame` never activate it. The `PreToolUse`
+hook denies `mcp__board__*` tools in chats that have not opted in. Activation is
+remembered per native chat, survives resume, and chats linked before 0.11.0 stay
+active. An unavailable hub no longer warns chats that never opted in. Rerun
+`install_hooks.py` to add the board-tool matcher and the `UserPromptExpansion`
+hook; without them, the opt-in rule is enforced only by the MCP instructions.
+
+Once a Claude chat is linked, `UserPromptSubmit` sets the chat title to its owned
+claimed job's title, or its `board_activity` title when it has no job. The title
+changes on the next prompt after the job or label changes. It is sent only when
+that source changes, so renaming the chat by hand sticks until the work changes.
+Titles are flattened to one line and capped at 80 characters. Codex has no
+hook-settable thread title.
+
+## Disconnected local work and recovery (0.9.1)
+
+Swarmboard is optional per native chat. Hooks enforce file/resource claims only
+after a successful board MCP response in the current session. Cached identities
+alone do not prove a connection. An unlinked chat, stopped server, rejected token,
+read-only database or hook failure allows local commands and edits; one short
+notice replaces repeated vetoes. Successful reconnection restores claim checks.
+Explicit conflicts from a healthy connected board still block edits.
+
+Identity recovery uses a declared board ID or native chat ID; no secret is
+needed. Recovery does not restore released locks or transfer another ID's
+work. A missing identity/database still
+requires reconnecting the correct board, but local work remains available.
+
+SQLite hot journals are recovered by opening the exact existing file in `mode=rw`
+when a read-only workspace check needs rollback. Journals are never manually
+deleted and no replacement database is created. Startup commands are ordinary
+local commands and remain usable while the coordinator is offline.
+
+
+Operator startup now resolves one complete workspace/database/port route from the
+selected project's configuration. It ignores the launcher's legacy global route
+unless --config explicitly selects it. Missing explicit configs and conflicting
+--workspace/--config combinations are errors, never fallbacks to the current
+folder or another project's port.
+
+## Trusted local identity (0.10.0)
+
+`board_identity` accepts **either** your existing `agent_id` **or** native `chat_id`
+(optional `harness`: `codex` or `claude`). No secret, identity proof or owner
+approval is required. With no arguments it uses the harness native ID when
+available. This tool runs before cached reconnect handling, so a stale connection
+cannot block identity selection. Bridges need a single MCP reload to load the tool.
+
+Ordinary hub calls also trust a known active `agent_id`; a missing or stale
+session token no longer rejects work. Connection tokens only fence late
+`disconnect`/`session_end` callbacks, preventing an older bridge exit from
+disconnecting a newer one. This call policy applies immediately to existing
+bridges when the hub is updated.
+
+An agent ID resumes that exact board record; a chat ID selects its existing
+binding or joins once if it has none. Explicit self-identification can correct
+a stale native binding. Display names remain labels. Selecting an identity does
+not transfer another ID's claims, jobs, messages or patches, and retirement's
+released locks stay released. File conflicts, queue-only policies and workspace
+boundaries still apply. `inherit` remains the separate work-transfer operation.
+
+## Native reconnect recovery (0.9.2)
+
+Reconnecting a native chat keeps its ID. Native reconnect checks the local
+chat binding rather than rejecting a rotated token. Retirement still releases
+locks; resuming does not restore released or handed-off work.
+
+The bridge refreshes reconnect snapshots from the configured project's database.
+Broken or rejected snapshots are discarded and the current connection remains
+usable. Canonical native bindings take priority over stale hook caches for both
+Codex and Claude. Ordinary reconnects need no owner inheritance command.

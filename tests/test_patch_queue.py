@@ -241,11 +241,11 @@ class PatchQueueTests(unittest.TestCase):
         with self.hub.connect() as db:
             db.execute('UPDATE custody_age SET since=?', (time.time()-7300,))
         self.call(self.a, 'release', claim_ids=ids, held_reason='unfinished')
-        self.assertIn('over 2h', self.call(self.a, 'board_status', target_agent_id='self')['custody_reminder'])
+        self.assertTrue(self.call(self.a, 'board_status', target_agent_id='self')['custody'][0]['age_warning'])
         ids = self.call(self.a, 'claim', paths=['common.txt'], reason='continue')['claim_ids']
         self.call(self.a, 'release', claim_ids=ids, held_reason='still unfinished')
-        self.assertIn('over 2h', self.call(self.a, 'board_status', target_agent_id='self')['custody_reminder'])
+        self.assertTrue(self.call(self.a, 'board_status', target_agent_id='self')['custody'][0]['age_warning'])
         self.call(self.a, 'custody_resolve', paths=['common.txt'], commit_hash='a'*40)
         ids = self.call(self.a, 'claim', paths=['common.txt'], reason='new')['claim_ids']
         self.call(self.a, 'release', claim_ids=ids, held_reason='new work')
-        self.assertNotIn('over 2h', self.call(self.a, 'board_status', target_agent_id='self')['custody_reminder'])
+        self.assertFalse(self.call(self.a, 'board_status', target_agent_id='self')['custody'][0]['age_warning'])

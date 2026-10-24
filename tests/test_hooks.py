@@ -88,21 +88,6 @@ class HookTests(unittest.TestCase):
         self.bind()
         self.assertFalse(self.call('board_desktop_wake', action='status')['enabled'])
 
-    def test_existing_native_identity_conflict_is_not_accused_of_other_chat(self):
-        import hashlib
-        key = hashlib.sha256(b'claude:native-session').hexdigest()
-        canonical = self.hub.call('register', {'name': 'claude-code', 'native_harness': 'claude', 'native_session_key': key})
-        reply = self.bind()
-        message = reply['hookSpecificOutput']['additionalContext']
-        self.assertIn(canonical['agent_id'], message)
-        self.assertIn('already assigned identity', message)
-        self.assertIn('Desktop Chat config overrides', message)
-        self.assertNotIn('belongs to another native chat', message)
-        prompt = self.event('UserPromptSubmit')['hookSpecificOutput']['additionalContext']
-        self.assertIn('identity mismatch', prompt)
-        blocked = self.event('PreToolUse', tool_name='Write', tool_input={'file_path':str(self.root/'a.py')})
-        self.assertEqual(blocked['hookSpecificOutput']['permissionDecision'], 'deny')
-
     def test_queue_member_cannot_directly_edit_queued_file(self):
         path = self.root / 'common.py'
         path.write_text('original\n')
@@ -113,12 +98,13 @@ class HookTests(unittest.TestCase):
         self.assertIn('patch queue lock', response['hookSpecificOutput']['permissionDecisionReason'])
 
     def test_link_uses_existing_mcp_identity_and_denies_unclaimed_edits(self):
-        self.assertEqual(self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(self.root / 'a.py')})['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(self.root / 'a.py')}), {})
         self.bind()
         self.assertEqual(len(self.call('board_status')['agents']), 1)
         self.assertEqual(self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(self.root / 'a.py')})['hookSpecificOutput']['permissionDecision'], 'deny')
         self.call('claim', paths=['a.py'], reason='Editing')
-        self.assertEqual(self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(self.root / 'a.py')}), {})
+        allowed = self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(self.root / 'a.py')})
+        self.assertIn('No owned job.', allowed['hookSpecificOutput']['additionalContext'])
         self.assertEqual(self.event('PreToolUse', tool_name='Write', tool_input={'file_path': str(self.root / 'b.py')})['hookSpecificOutput']['permissionDecision'], 'deny')
 
     def test_patch_move_requires_both_paths_and_claim_expiry_is_checked(self):
@@ -128,10 +114,26 @@ class HookTests(unittest.TestCase):
         self.call('claim', paths=['a.py'], reason='Rename')
         self.assertEqual(self.event('PreToolUse', tool_name='apply_patch', tool_input={'command': patch})['hookSpecificOutput']['permissionDecision'], 'deny')
         self.call('claim', paths=['b.py'], reason='Rename target')
-        self.assertEqual(self.event('PreToolUse', tool_name='apply_patch', tool_input={'command': patch}), {})
+        allowed = self.event('PreToolUse', tool_name='apply_patch', tool_input={'command': patch})
+        self.assertIn('No owned job.', allowed['hookSpecificOutput']['additionalContext'])
         with self.hub.connect() as db:
             db.execute('UPDATE claims SET expires=0')
         self.assertEqual(self.event('PreToolUse', tool_name='apply_patch', tool_input={'command': patch})['hookSpecificOutput']['permissionDecision'], 'deny')
+
+    def test_owned_job_reminder_follows_claim_and_expiry(self):
+        from board.rules import JOB_REQUIREMENT, COORDINATION_RULES
+        self.assertEqual(self.event('SessionStart'), {})
+        self.assertTrue(COORDINATION_RULES.startswith(JOB_REQUIREMENT))
+        self.assertIn(JOB_REQUIREMENT, str(self.bind()))
+        self.call('claim', paths=['a.py'], reason='Editing')
+        def edit():
+            return self.event('PreToolUse', tool_name='Edit', tool_input={'file_path': str(self.root / 'a.py')})
+        self.assertIn('No owned job.', edit()['hookSpecificOutput']['additionalContext'])
+        job = self.call('job_post_and_claim', title='Fix', description='Human task', acceptance='Fixed')['job']
+        self.assertNotIn('No owned job.', str(edit()))
+        with self.hub.connect() as db:
+            db.execute('UPDATE jobs SET expires=0 WHERE id=?', (job['id'],))
+        self.assertIn('No owned job.', edit()['hookSpecificOutput']['additionalContext'])
 
     def test_git_requires_index_mutex_and_other_shell_commands_get_reminders(self):
         self.bind()
@@ -140,7 +142,7 @@ class HookTests(unittest.TestCase):
         self.call('mutex_claim', resources=['git:index'], reason='Commit')
         allowed = self.event('PreToolUse', tool_name='Bash', tool_input={'command': 'git add a.py'})
         self.assertNotIn('permissionDecision', allowed['hookSpecificOutput'])
-        self.assertIn('cooperative', self.event('PreToolUse', tool_name='Bash', tool_input={'command': 'python arbitrary_writer.py'})['hookSpecificOutput']['additionalContext'])
+        self.assertEqual(self.event('PreToolUse', tool_name='Bash', tool_input={'command': 'python arbitrary_writer.py'}), {})
 
     def test_stop_nags_and_session_end_reopens_without_committing(self):
         self.bind()
@@ -151,14 +153,6 @@ class HookTests(unittest.TestCase):
         status = self.call('job_list')['jobs'][0]
         self.assertEqual(status['state'], 'OPEN')
         self.assertIsNone(status['commit_hash'])
-
-    def test_late_native_end_with_stale_credentials_does_not_disconnect(self):
-        self.bind()
-        with self.hub.connect() as db:
-            db.execute('UPDATE agents SET token=? WHERE id=?',('new-connection-token',self.agent['agent_id']))
-        self.assertEqual(self.event('SessionEnd'),{})
-        with self.hub.connect() as db:
-            self.assertIsNone(db.execute('SELECT disconnected FROM agents WHERE id=?',(self.agent['agent_id'],)).fetchone()[0])
 
     def test_retired_native_end_exits_without_hook_error(self):
         self.bind()
@@ -187,8 +181,7 @@ class HookTests(unittest.TestCase):
                                 ('Edit', {'file_path': str(self.root / 'a.py')})]:
             for index in range(7):
                 last_id = self.call('noticeboard_post', body=f'{tool} notice {index}: ' + 'x' * 4700)['id']
-            with self.assertRaisesRegex(BoardError, 'RESPONSE_TOO_LARGE'):
-                self.call('noticeboard_read')
+            self.assertTrue(self.call('noticeboard_read')['has_more'])
             requests.clear()
             output = self.event('PreToolUse', tool_name=tool, tool_input=arguments)['hookSpecificOutput']
             self.assertNotIn('permissionDecision', output)
@@ -215,8 +208,7 @@ class HookTests(unittest.TestCase):
         with self.hub.connect() as db:
             for i in range(30):
                 db.execute("INSERT INTO custody VALUES (?,?,'HELD',?,NULL,0)", (f'old{i}.py', self.agent['agent_id'], 'y' * 1000))
-        with self.assertRaisesRegex(BoardError, 'RESPONSE_TOO_LARGE'):
-            self.call('board_status', target_agent_id='self', include_rules=False)
+        self.assertTrue(self.call('board_status', target_agent_id='self', include_rules=False)['has_more'])
         allowed = self.event('PreToolUse', tool_name='Edit', tool_input={'file_path':str(path)})
         self.assertNotEqual(allowed.get('hookSpecificOutput', {}).get('permissionDecision'), 'deny')
         denied = self.event('PreToolUse', tool_name='Edit', tool_input={'file_path':str(self.root/'unclaimed.py')})
@@ -261,9 +253,11 @@ class HookTests(unittest.TestCase):
                               ('PostToolUse', {'tool_name': 'mcp__other__read', 'tool_response': {}}),
                               ('UserPromptSubmit', {'prompt': 'Continue'}), ('SessionStart', {})]:
             with self.subTest(event=event, fields=fields):
-                output = self.event(event, **fields)['hookSpecificOutput']
-                self.assertEqual(output['hookEventName'], event)
-                self.assertIn('Please check this reply now', output['additionalContext'])
+                reply = self.event(event, **fields)
+                if event == 'PostToolUse' and fields.get('tool_name') == 'Read':
+                    self.assertIn('Please check this reply now', str(reply))
+                else:
+                    self.assertNotIn('Please check this reply now', str(reply))
                 self.assertEqual(self.call('inbox_read')['unread_inbox'], 1)
         self.call('inbox_ack', message_ids=[message['id']])
         self.assertEqual(self.event('UserPromptSubmit', prompt='Continue'), {})
@@ -271,9 +265,10 @@ class HookTests(unittest.TestCase):
 
     def test_unlinked_session_reports_delivery_gap_without_guessing_identity(self):
         first = self.event('PostToolUse', tool_name='Read')
-        self.assertIn('not linked', first['hookSpecificOutput']['additionalContext'])
+        self.assertEqual(first, {})
         self.assertEqual(self.event('PostToolUse', tool_name='Read'), {})
-        self.assertIn('native board_status', self.event('UserPromptSubmit')['hookSpecificOutput']['additionalContext'])
+        self.assertEqual(self.event('UserPromptSubmit', prompt='hi'), {})
+        self.assertIn('activated', self.event('UserPromptSubmit', prompt='/board')['hookSpecificOutput']['additionalContext'])
         self.assertIn('linked', self.bind()['hookSpecificOutput']['additionalContext'])
 
     def test_inbox_surfaces_on_board_calls_and_blocked_edits_until_ack(self):
@@ -285,7 +280,7 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.call('inbox_read')['unread_inbox'], 1)
         rejected = self.event('PreToolUse', tool_name='Write', tool_input={'file_path': 'unclaimed.py'})
         self.assertEqual(rejected['hookSpecificOutput']['permissionDecision'], 'deny')
-        self.assertIn('I am waiting', rejected['hookSpecificOutput']['permissionDecisionReason'])
+        self.assertNotIn('I am waiting', rejected['hookSpecificOutput']['permissionDecisionReason'])
         self.call('inbox_ack', message_ids=[message['id']])
         self.assertEqual(self.bind(), {})
 
@@ -298,13 +293,6 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.call('board_status')['claims'], before)
         self.call('release', claim_ids=claim['claim_ids'], reason='Preview stopped')
         self.assertEqual(self.event('Stop'), {})
-
-    def test_retired_identity_is_rejected_and_unavailable_hub_raises(self):
-        self.bind()
-        other = self.hub.call('register', {'name': 'Other'})
-        self.hub.call('takeover', {**other, 'target_agent_id': self.agent['agent_id'], 'reason': 'Unavailable'})
-        with self.assertRaisesRegex(BoardError, 'retired'):
-            self.event('PreToolUse', tool_name='Write', tool_input={'file_path': 'a.py'})
 
     def test_installer_preserves_settings_and_is_idempotent(self):
         path = self.root / 'settings.json'

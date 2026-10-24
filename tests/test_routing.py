@@ -24,15 +24,15 @@ class RoutingTests(unittest.TestCase):
         path.write_text(json.dumps({'workspace': str(workspace),
                                     'database': str(self.root / 'existing.sqlite'), 'port': port}))
 
-    def test_actual_launch_directory_and_distinct_stable_defaults(self):
+    def test_unconfigured_launch_directory_is_refused_and_explicit_defaults_are_distinct(self):
+        # 0.12: an unconfigured launch directory (Desktop starts bridges in C:\) is never a board.
         with patch('board.runtime.Path.cwd', return_value=self.a):
-            a = workspace_connection()
-        with patch('board.runtime.Path.cwd', return_value=self.b):
-            b = workspace_connection()
+            with self.assertRaisesRegex(BoardError, 'WORKSPACE_REQUIRED'):
+                workspace_connection()
+        a, b = workspace_connection(self.a), workspace_connection(self.b)
         self.assertEqual(a[0], str(self.a))
         self.assertEqual(a[1], str(self.a / '.board/hub.sqlite'))
         self.assertNotEqual(a[2], b[2])
-        self.assertEqual(a, workspace_connection(self.a))
 
     def test_local_config_preserves_existing_state(self):
         self.save(self.a, self.a)

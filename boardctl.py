@@ -4,9 +4,31 @@ import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlparse
 
 from board.core import BoardError, Hub
-from board.runtime import ensure_hub
+from board.runtime import ROUTE, ensure_hub, workspace_connection
+
+
+def operator_connection(args):
+    """Keep workspace, database and port together; never merge global routes."""
+    if args.config is not None:
+        if not args.config.is_file():
+            raise BoardError('--config must identify an existing operator configuration')
+        saved = json.loads(args.config.read_text(encoding='utf-8'))
+        if not isinstance(saved, dict) or not saved.get('workspace'):
+            raise BoardError('--config requires workspace, database and port')
+        workspace = Path(args.workspace or saved['workspace']).resolve()
+        if workspace != Path(saved['workspace']).resolve():
+            raise BoardError('--workspace conflicts with --config workspace; refusing mixed project routing')
+        workspace, database, url = workspace_connection(str(workspace), args.database or saved.get('database'))
+        port = args.port if args.port is not None else saved.get('port', urlparse(url).port)
+    else:
+        workspace, database, url = workspace_connection(args.workspace, args.database)
+        port = args.port if args.port is not None else urlparse(url).port
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise BoardError('port must be an integer between 1 and 65535')
+    return Path(workspace), Path(database), port
 
 
 def main():
@@ -48,15 +70,10 @@ def main():
             workspace = Path(args.workspace).resolve()
             database = Path(args.database).resolve() if args.database else workspace / '.board/hub.sqlite'
             print(json.dumps(configure(workspace, database, args.port if args.port is not None else 4317,
-                                       args.config or workspace / '.codex/board-operator.json',
+                                       args.config or workspace / ROUTE,
                                        Path(__file__).resolve().parent, args.mcp_config), indent=2))
             return
-        args.config = args.config or Path(__file__).resolve().parent / '.board/operator.json'
-        saved = json.loads(args.config.read_text()) if args.config.exists() else {}
-        # Explicit workspace selects its own state; never silently reuse another project's DB.
-        workspace = Path(args.workspace or saved.get('workspace') or Path.cwd()).resolve()
-        database = Path(args.database or (None if args.workspace else saved.get('database')) or workspace / '.board/hub.sqlite').resolve()
-        port = args.port or saved.get('port', 4317)
+        workspace, database, port = operator_connection(args)
         if args.command == 'wake':
             from board.codex_wake import run
             print(json.dumps(run(database, workspace, args.agent_id, args.thread_id,

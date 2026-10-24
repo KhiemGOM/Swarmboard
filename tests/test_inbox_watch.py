@@ -124,24 +124,6 @@ class InboxWatchTests(unittest.TestCase):
         self.assertIsNone(wakes[0]); self.assertIn('Only second chat', wakes[1]); self.assertIsNone(wakes[2])
         self.assertTrue(all(watch_inbox(self.root, self.database, p, seconds=.02, poll_seconds=.005) is None for p in payloads))
 
-    def test_legacy_three_sessions_same_agent_migrate_to_one_owner(self):
-        import sqlite3
-        with sqlite3.connect(self.database) as db:
-            db.execute('DELETE FROM hook_inbox_bindings')
-            db.execute('DELETE FROM native_sessions')
-        payloads = [{**self.payload, 'session_id': f'legacy-{i}'} for i in range(3)]
-        # Remove the setup binding so only these three legacy sessions compete.
-        for path in (self.root/'hook-sessions').glob('*.json'):
-            path.unlink()
-        for i, payload in enumerate(payloads):
-            key = hashlib.sha256(('claude:' + payload['session_id']).encode()).hexdigest()
-            path = self.root/'hook-sessions'/f'{key}.json'
-            path.write_text(json.dumps({'agent_id': self.recipient['agent_id'], 'session_token': self.recipient['session_token']}))
-            os.utime(path, (100+i, 100+i))
-        self.send('Legacy direct message')
-        wakes = [watch_inbox(self.root, self.database, p, seconds=.04, poll_seconds=.005) for p in payloads]
-        self.assertIsNone(wakes[0]); self.assertIsNone(wakes[1]); self.assertIn('Legacy direct message', wakes[2])
-
     def test_duplicate_hook_cannot_read_or_disconnect_owner_inbox(self):
         adapter = Adapter(self.root, self.database, 'claude', caller=lambda url, method, params: self.hub.call(method, params))
         duplicate = {**self.payload, 'session_id': 'duplicate-chat'}

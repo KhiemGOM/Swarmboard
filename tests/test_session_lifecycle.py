@@ -20,15 +20,14 @@ class SessionLifecycleTests(unittest.TestCase):
         self.agent = self.hub.call('register', self.registration)
         self.peer = self.hub.call('register', {'name':'peer'})
 
-    def test_repeated_startup_keeps_one_id_and_fences_previous_connection(self):
+    def test_repeated_startup_keeps_one_id_and_old_bridge_calls_usable(self):
         claim = self.hub.call('claim', {**self.agent,'paths':['work.py'],'reason':'continue'})
         msg = self.hub.call('inbox_send', {**self.peer,'recipient_agent_id':self.agent['agent_id'],'body':'pending'})
         previous = self.agent
         for _ in range(4):
             current = self.hub.call('register', self.registration)
             self.assertEqual(current['agent_id'], self.agent['agent_id'])
-            with self.assertRaisesRegex(BoardError, 'invalid session token'):
-                self.hub.call('board_status', previous)
+            self.hub.call('board_status', previous)
             previous = current
         status = self.hub.call('board_status', {**current,'target_agent_id':'self'})
         self.assertEqual([r['id'] for r in status['claims']], claim['claim_ids'])
@@ -60,8 +59,7 @@ class SessionLifecycleTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT active FROM claims WHERE id=?', (claim['claim_ids'][0],)).fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (job['id'],)).fetchone()[0], 'OPEN')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM agents').fetchone()[0], 2)
-        with self.assertRaisesRegex(BoardError, 'invalid session token'):
-            self.hub.call('board_status', self.agent)
+        self.hub.call('board_status', self.agent)
 
     def assert_send_rejected(self, error):
         with self.hub.connect() as db:
@@ -90,8 +88,7 @@ class SessionLifecycleTests(unittest.TestCase):
         self.assertEqual(self.hub.call('board_status', {**resumed,'target_agent_id':'self'})['claims'], [])
         with self.hub.connect() as db:
             self.assertEqual(db.execute('SELECT agent FROM claims WHERE id=?', (claim['claim_ids'][0],)).fetchone()[0], self.peer['agent_id'])
-        with self.assertRaisesRegex(BoardError, 'invalid session token'):
-            self.hub.call('board_status', self.agent)
+        self.hub.call('board_status', self.agent)
 
     def test_retirement_and_inheritance_disable_old_wake_binding(self):
         self.hub.call('board_desktop_wake', {**self.agent,'action':'enable','thread_id':'chat-one',

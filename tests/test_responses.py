@@ -31,8 +31,9 @@ class ResponseTests(unittest.TestCase):
             for i in range(150):
                 db.execute('INSERT INTO agents(id,name,token,state,started,seen) VALUES (?,?,?, ?,0,0)',
                            (str(i), 'x' * 200, 'private', 'active'))
-        with self.assertRaisesRegex(BoardError, 'RESPONSE_TOO_LARGE'):
-            self.call('board_status')
+        first = self.call('board_status')
+        self.assertTrue(first['has_more'])
+        self.assertLess(len(encode(first)), MAX_RESPONSE_CHARS)
         self.assertLess(len(encode(self.call('board_status', target_agent_id='self', include_rules=False))), MAX_RESPONSE_CHARS)
 
     def test_notice_and_inbox_pages_without_ack(self):
@@ -40,8 +41,7 @@ class ResponseTests(unittest.TestCase):
             self.call('noticeboard_post', body='x' * 16000)
             self.call('inbox_send', recipient_agent_id=self.identity['agent_id'], body='x' * 16000)
         for method, key in [('noticeboard_read', 'posts'), ('inbox_read', 'messages')]:
-            with self.assertRaisesRegex(BoardError, 'RESPONSE_TOO_LARGE.*limit=1'):
-                self.call(method)
+            self.assertTrue(self.call(method)['has_more'])
             first = self.call(method, limit=1)[key][0]
             second = self.call(method, limit=1, after_id=first['id'])[key][0]
             self.assertGreater(second['id'], first['id'])
@@ -53,8 +53,7 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(self.call('job_list')['jobs'], [])
         self.call('job_post', title='OK', description='x' * 12000, acceptance='OK')
         self.call('job_post', title='OK', description='y' * 12000, acceptance='OK')
-        with self.assertRaisesRegex(BoardError, 'RESPONSE_TOO_LARGE'):
-            self.call('job_list')
+        self.assertTrue(self.call('job_list')['has_more'])
         self.assertEqual(len(self.call('job_list', limit=1)['jobs']), 1)
 
     def test_page_validation_and_schema(self):

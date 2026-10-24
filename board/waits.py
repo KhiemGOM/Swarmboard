@@ -36,12 +36,16 @@ def process(db, now):
             row = db.execute('SELECT state FROM patch_batches WHERE id=?', (int(target),)).fetchone()
             done = bool(row and row[0] in ('APPLIED', 'BLOCKED'))
             duplicate = bool(db.execute('SELECT 1 FROM patch_members WHERE batch_id=? AND agent=?', (int(target), wait['agent'])).fetchone())
+        elif kind == 'condition':
+            from .wait_conditions import evaluate
+            done = evaluate(db, json.loads(target), now, wait['agent'])
         expired = wait['expires'] <= now
         if not done and not expired:
             continue
         message_id = None
         if not (done and duplicate):
-            text = (f'Swarmboard wait #{wait["id"]}: {kind} {target} ' +
+            detail = '' if kind == 'condition' else target + ' '
+            text = (f'Swarmboard wait #{wait["id"]}: {kind} {detail}' +
                     ('is ready.' if done else 'timed out.') +
                     ' Availability is a snapshot, not a reservation. Inspect current state before acting. This notification does not authorize new work.')
             message_id = db.execute("INSERT INTO messages(sender,recipient,body,created) VALUES ('system',?,?,?)", (wait['agent'], text, now)).lastrowid
@@ -70,7 +74,10 @@ def dispatch(hub, db, p, agent, now):
         after = p.get('after_id', 0)
         if type(after) is not int or after < 0:
             raise BoardError('after_id must be a nonnegative integer')
-        return {'waits': [dict(r) for r in db.execute('SELECT * FROM board_waits WHERE agent=? AND id>? ORDER BY id LIMIT 50', (agent, after))]}
+        limit = p.get('limit', 5)
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise BoardError('limit must be 1 to 50')
+        return {'waits': [dict(r) for r in db.execute('SELECT * FROM board_waits WHERE agent=? AND id>? ORDER BY id LIMIT ?', (agent, after, limit + 1))]}
     if action == 'cancel':
         wait_id = p.get('wait_id')
         if type(wait_id) is not int:
@@ -82,7 +89,10 @@ def dispatch(hub, db, p, agent, now):
     if action != 'subscribe':
         raise BoardError('action must be subscribe, list or cancel')
     kind = p.get('kind')
-    if kind == 'mutex_free':
+    if kind == 'condition':
+        from .wait_conditions import compile_condition
+        target = json.dumps(compile_condition(hub, db, p.get('condition'), agent, now), sort_keys=True)
+    elif kind == 'mutex_free':
         from .claims import resource
         if ('path' in p) == ('resource' in p):
             raise BoardError('Provide exactly one path or resource for mutex_free')
@@ -98,7 +108,7 @@ def dispatch(hub, db, p, agent, now):
             raise BoardError('batch_id must identify an existing patch batch')
         target = str(target)
     else:
-        raise BoardError('kind must be message_ack, mutex_free or patch_finalized; inbox delivery is already automatic')
+        raise BoardError('kind must be condition, message_ack, mutex_free or patch_finalized; inbox delivery is already automatic')
     seconds = p.get('timeout_seconds', 3600)
     if type(seconds) is not int or not 1 <= seconds <= 86400:
         raise BoardError('timeout_seconds must be 1 to 86400')

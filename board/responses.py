@@ -29,7 +29,7 @@ def check(method, value):
 def page(params):
     from .core import BoardError
     after = params.get('after_id', 0)
-    limit = params.get('limit', 100)
+    limit = params.get('limit', 10)
     if type(after) is not int or after < 0:
         raise BoardError('after_id must be a non-negative integer')
     if type(limit) is not int or not 1 <= limit <= 100:

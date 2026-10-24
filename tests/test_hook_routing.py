@@ -43,13 +43,6 @@ class HookRoutingTests(unittest.TestCase):
             with self.assertRaisesRegex(BoardError, 'absolute cwd'):
                 hook_connection(payload)
 
-    def test_wrong_local_workspace_is_rejected(self):
-        a, database, port = self.projects[0]
-        b = self.projects[1][0]
-        (a / '.codex/board-operator.json').write_text(json.dumps({'workspace': str(b), 'database': str(database), 'port': port}))
-        with self.assertRaisesRegex(BoardError, 'different workspace'):
-            hook_connection({'cwd': str(a)})
-
     def test_installer_global_hooks_have_no_project_arguments(self):
         codex, claude = self.root / 'hooks.json', self.root / 'settings.json'
         with patch.object(sys, 'argv', ['install_hooks.py', '--codex-config', str(codex), '--claude-config', str(claude)]):

@@ -113,7 +113,7 @@ class WorkspaceTests(unittest.TestCase):
         from board.mcp import TOOLS
         from board.hooks import Adapter
         tool = next(t for t in TOOLS if t['name'] == 'board_workspace')
-        self.assertEqual(set(tool['inputSchema']['properties']), {'workspace', 'reason'})
+        self.assertEqual(set(tool['inputSchema']['properties']), {'workspace', 'reason', '_route'})
         adapter = Adapter(self.old, self.old / 'hub.sqlite', 'codex')
         response = adapter.handle({'hook_event_name': 'PostToolUse', 'cwd': str(self.old),
             'session_id': 'session', 'tool_name': 'mcp__board__board_workspace',
@@ -142,7 +142,6 @@ class WorkspaceTests(unittest.TestCase):
                                  capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 0, run.stderr)
             replies = [json.loads(line)['result'] for line in run.stdout.splitlines()]
-            self.assertIn('no project is selected', replies[0]['instructions'])
             self.assertTrue(replies[1]['tools'])
             self.assertTrue(replies[2]['isError'])
             self.assertIn('WORKSPACE_REQUIRED', replies[2]['content'][0]['text'])

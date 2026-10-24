@@ -36,6 +36,14 @@ def leave(hub, db, params, agent, now):
             'unread_inbox_retained': unread}
 
 
+def chat_registration(args):
+    """The calling chat's own native binding when the bridge routes per chat."""
+    if getattr(args, 'registration', None):
+        return args.registration
+    from .mcp import native_registration
+    return native_registration(args.name)
+
+
 def switch(args, identity, arguments):
     # No caller-supplied identity, token, URL, database or target agent is accepted.
     if set(arguments) != {'workspace', 'reason'}:
@@ -48,8 +56,7 @@ def switch(args, identity, arguments):
     workspace, database, url = workspace_connection(value)
     if identity is None:
         ensure_hub(url, workspace, database, True)
-        from .mcp import native_registration
-        new_identity = call(url, 'register', native_registration(args.name))
+        new_identity = call(url, 'register', chat_registration(args))
         args.workspace, args.database, args.url = workspace, database, url
         return new_identity, {'switched': True, 'workspace': workspace,
                               'instructions': new_identity['instructions']}
@@ -60,8 +67,7 @@ def switch(args, identity, arguments):
     ensure_hub(url, workspace, database, True)
     old_wake = call(args.url, 'board_desktop_wake', {
         'agent_id': identity['agent_id'], 'session_token': identity['session_token'], 'action': 'status'})
-    from .mcp import native_registration
-    registration = native_registration(args.name)
+    registration = dict(chat_registration(args))
     if old_wake['enabled'] and args.name == 'codex':
         import hashlib
         registration.update(native_harness='codex', native_session_key=hashlib.sha256(('codex:'+old_wake['thread_id']).encode()).hexdigest())

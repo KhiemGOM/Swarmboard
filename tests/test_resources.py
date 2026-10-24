@@ -39,7 +39,7 @@ class ResourceTests(unittest.TestCase):
         self.hub = Hub(self.root / "hub.sqlite", self.root)
         status = self.call(self.a, "board_status")
         self.assertFalse(status["claims"])
-        self.assertIn("custody_reminder", status)
+        self.assertNotIn("custody_reminder", status)
         self.assertEqual(status["custody"][0]["owner"], self.a["agent_id"])
         self.call(self.b, "claim", paths=["src"], reason="continue")
         status = self.call(self.b, "board_status")
