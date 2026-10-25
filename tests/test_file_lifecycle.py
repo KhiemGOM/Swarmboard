@@ -65,7 +65,7 @@ class FileLifecycleTests(unittest.TestCase):
         with self.hub.connect() as db:
             with self.assertRaisesRegex(BoardError, 'verified missing'):
                 lifecycle.dispatch(self.hub, db, {'action': 'deleted', 'path': 'a.py', 'reason': 'removed'}, self.agent['agent_id'], time.time())
-            with self.assertRaisesRegex(BoardError, 'inside'):
+            with self.assertRaisesRegex(BoardError, 'outside this board'):
                 lifecycle.dispatch(self.hub, db, {'action': 'deleted', 'path': str(self.root.parent / 'outside'), 'reason': 'removed'}, self.agent['agent_id'], time.time())
 
     def test_recreated_file_can_be_claimed_and_deleted_again(self):

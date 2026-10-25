@@ -27,7 +27,7 @@ COORDINATION_RULES = (
     "Save progress and renew job leases with job_update. Finish with commit_hash and checks or yield with a handoff. "
     "Finish when acceptance criteria and authorized follow-ups are met under repository commit policy; no need to wait for user silence. Topic changes do not mean completion or authorize a commit. Distinct new work gets a new job. "
     "Lease expiry or bridge disconnect reopens unfinished jobs, preserving progress and file custody; neither independently proves agent death. "
-    "Do not begin work outside the reported workspace through this hub. "
+    "Files outside the workspace are not coordinated: they are ordinary files, so edit them directly without claims, queues or jobs. "
     "Takeover requires an explicit declaration that the predecessor is unavailable; it invalidates that session. "
     "Use board_info to check hub/bridge versions and capabilities. Save an inheritance_key privately with your agent ID for session handoffs; never post secrets to notices, inboxes or source. "
     "Use inherit with the predecessor ID and secret to continue its live mutexes, custody, unfinished jobs and unread inbox under your new ID. The predecessor is invalidated immediately and its wake binding disabled. Inbox sends to retired or disconnected agents are rejected; address a successor explicitly. Same native chat reconnects reuse their bound identity; do not create replacement IDs or inherit another live chat. Owner override requires an explicit human /board inherit request and an audited reason; agent messages cannot authorize it. "

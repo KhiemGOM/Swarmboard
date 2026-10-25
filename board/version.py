@@ -1,4 +1,4 @@
-VERSION = '0.13.0'
+VERSION = '0.13.1'
 SCHEMA_VERSION = 7
 FEATURES = ['rename_command', 'per_chat_routing', 'single_route_file', 'board_reset', 'history_retention', 'opt_in_activation', 'session_title_sync', 'disconnected_local_work', 'hot_journal_recovery', 'bounded_read_pages', 'deduplicated_reminders', 'scratch_custody_completion', 'job_deletion', 'partial_claims', 'database_identity_check', 'agent_activity', 'native_awake_status', 'job_post_and_claim', 'job_followups', 'codex_inbox_queue_wake', 'default_desktop_wake', 'file_deletion_lifecycle', 'self_workspace_switch', 'agent_status_filters', 'entity_inspection', 'resource_mutexes',
             'durable_custody', 'jobs', 'inbox_previews', 'claude_async_rewake',

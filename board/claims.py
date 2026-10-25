@@ -43,6 +43,12 @@ def dispatch(hub, db, method, p, agent, now):
             raise BoardError("Provide a non-empty paths or resources list")
         if method == "mutex_claim" and (files or not resources):
             raise BoardError("mutex_claim accepts resources only")
+        outside = [v for v in files if hub.outside(v)]
+        if outside and (len(outside) < len(files) or resources):
+            # Lock only what the board coordinates; outside files are free to edit.
+            from .core import OUTSIDE_NOTE
+            result = dispatch(hub, db, method, {**p, "paths": [v for v in files if v not in outside]}, agent, now)
+            return {**result, "outside_workspace": outside, "outside_note": OUTSIDE_NOTE}
         entities = list(dict.fromkeys([("file", hub.path(v)) for v in files] + [("resource", resource(v)) for v in resources]))
         proposed = {(kind, path): db.execute('SELECT * FROM claims WHERE active=1 AND agent=? AND kind=? AND path=?',
                     (agent, kind, path)).fetchone() or {'path': path, 'exclusions': []} for kind, path in entities}

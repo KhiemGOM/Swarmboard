@@ -9,6 +9,10 @@ from .version import VERSION, SCHEMA_VERSION, FEATURES
 from .responses import check, page, MAX_RESPONSE_CHARS
 
 
+OUTSIDE_NOTE = ("Swarmboard does not coordinate files outside the workspace: they are ordinary files, "
+                "so no claim, queue or relax is needed; edit it directly.")
+
+
 class BoardError(Exception):
     pass
 
@@ -100,8 +104,18 @@ class Hub:
         try:
             relative = candidate.relative_to(self.workspace)
         except ValueError:
-            raise BoardError("Path must stay inside the registered workspace")
+            raise BoardError(f"{candidate} is outside this board's workspace {self.workspace}. " + OUTSIDE_NOTE)
         return os.path.normcase(relative.as_posix()).replace("\\", "/") or "."
+
+    def outside(self, value):
+        """True for a well-formed path that resolves outside the workspace; bad input is left to path()."""
+        if not isinstance(value, str) or not value.strip() or any(char in value for char in "*?["):
+            return False
+        try:
+            (self.workspace / value).resolve().relative_to(self.workspace)
+        except ValueError:
+            return True
+        return False
 
     @staticmethod
     def overlaps(a, b):

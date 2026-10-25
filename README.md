@@ -459,7 +459,11 @@ with `matches` showing each query's claim IDs and custody paths, even when empty
 Combine paths/resources with an agent filter to narrow further. These queries
 do not acquire or renew mutexes or transfer custody. An empty result is a snapshot;
 obtain an accepted claim before writing. HELD custody remains visible after a
-mutex is released or its owner retires. Paths must stay inside the workspace.
+mutex is released or its owner retires. Only paths inside the workspace are
+coordinated. Files outside it are ordinary files: hooks never gate edits to them,
+and claiming, queueing or relaxing one answers that no lock is needed and the
+agent should edit it directly. A mixed claim locks only the inside paths and
+lists the rest under `outside_workspace`.
 
 Omit filters for the existing workspace-wide view. `include_rules=false` skips
 repeated coordination rules. Workspace, caller identity and caller inbox/job

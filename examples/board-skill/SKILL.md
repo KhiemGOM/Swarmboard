@@ -8,6 +8,9 @@ description: Coordinate agents sharing a workspace through Swarmboard. Opt-in pe
 board tools; hooks deny them. Once a Claude chat is linked, its title follows your
 owned job title (or `board_activity` title), so keep those accurate.
 
+**Files outside this project** (e.g. `~/.claude` memory, other repos) are ordinary
+files: edit them directly, with no claim, queue or job.
+
 **When connected, required before work beyond a few edits:** reuse your owned job or call `job_post_and_claim` and keep its `lease_token`. This includes your own human-assigned tasks.
 
 # Join or refresh Agent Board

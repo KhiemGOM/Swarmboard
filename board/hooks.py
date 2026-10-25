@@ -289,6 +289,10 @@ class Adapter:
             return {}
         arguments = payload.get('tool_input') or {}
         edit = name in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'apply_patch')
+        if edit and event == 'PreToolUse':
+            paths = edit_paths(name, arguments)
+            # Files outside the project are ordinary files: no claim, job or gating.
+            edit = not paths or any(self.inside(cwd, path) for path in paths)
         if self.harness == 'codex':
             self.ensure_desktop_wake(auth, session_id, event)
         status = self.hook_status(auth, payload)
@@ -325,10 +329,9 @@ class Adapter:
             if not paths:
                 return blocked('Swarmboard could not identify edit paths; use a supported file edit or coordinate the operation explicitly.')
             for path in paths:
-                try:
-                    relative = (cwd / path.strip()).resolve().relative_to(self.workspace)
-                except ValueError:
-                    return blocked('Edit target is outside the Swarmboard workspace.')
+                if not self.inside(cwd, path):
+                    continue
+                relative = (cwd / path.strip()).resolve().relative_to(self.workspace)
                 target = os.path.normcase(relative.as_posix()).replace('\\', '/') or '.'
                 with closing(sqlite3.connect(f'{self.database.as_uri()}?mode=ro', uri=True)) as db:
                     queues = db.execute("SELECT id,path FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')").fetchall()
@@ -360,6 +363,13 @@ class Adapter:
         if event == 'Stop' and reminders:
             reminders.insert(0, 'Swarmboard handoff reminder: record completion or saved progress for unfinished work. No automatic commit or completion.')
         return context(event, '\n'.join(reminders)) if reminders else {}
+
+    def inside(self, cwd, path):
+        try:
+            (cwd / path.strip()).resolve().relative_to(self.workspace)
+        except ValueError:
+            return False
+        return True
 
     def hook_status(self, auth, payload):
         session = payload.get('session_id')
