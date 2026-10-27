@@ -46,13 +46,9 @@ def hook_connection(payload, workspace=None, database=None, url=None):
 
 
 def activation_notes(payload, harness, cleaned):
-    notes = ['Swarmboard cleaned up: ' + '; '.join(cleaned) + '.'] if cleaned else []
-    if harness == 'claude':
-        from board.desktop_config import duplicates, warning
-        found = duplicates()
-        if found:
-            notes.append(warning(found))
-    return notes
+    # A Desktop-defined board bridge is harmless now that every call carries its chat's route;
+    # its hint appears only when a chat actually hits a shared-bridge refusal or mismatch.
+    return ['Swarmboard cleaned up: ' + '; '.join(cleaned) + '.'] if cleaned else []
 
 
 def main():

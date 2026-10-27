@@ -393,12 +393,15 @@ class HookEntryTests(unittest.TestCase):
         stamped = self.run_hook(hook_event_name='PreToolUse', tool_name='mcp__board__board_status', tool_input={})
         self.assertEqual(stamped['hookSpecificOutput']['updatedInput']['_route']['session_id'], 'chat')
 
-    def test_board_prompt_warns_about_desktop_duplicates(self):
+    def test_board_prompt_does_not_nag_about_harmless_desktop_duplicates(self):
+        # Per-chat routing makes a shared Desktop bridge harmless; the hint is kept for real refusals only.
         profile = self.root / 'ClaudeProfiles/acc2'
         profile.mkdir(parents=True)
         (profile / 'claude_desktop_config.json').write_text(json.dumps({'mcpServers': {'board': {'command': 'x'}}}))
         reply = self.run_hook(hook_event_name='UserPromptSubmit', prompt='/board')
-        self.assertIn('claude_desktop_config.json', reply['hookSpecificOutput']['additionalContext'])
+        note = reply['hookSpecificOutput']['additionalContext']
+        self.assertIn('activated', note)
+        self.assertNotIn('claude_desktop_config.json', note)
 
 
 class DesktopConfigTests(unittest.TestCase):
