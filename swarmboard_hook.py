@@ -32,6 +32,12 @@ def unavailable(payload, database, harness, reason=None):
     return context(payload.get('hook_event_name'), 'Swarmboard disconnected; local work is allowed. Coordination checks resume when connected.')
 
 
+def read_payload(stream):
+    # Harnesses send UTF-8; Windows Python would otherwise decode stdin in the locale codepage.
+    raw = getattr(stream, 'buffer', None)
+    return json.loads(raw.read().decode('utf-8-sig') if raw is not None else stream.read())
+
+
 def hook_connection(payload, workspace=None, database=None, url=None):
     """Route global hooks using native payload cwd, never the launcher checkout."""
     if not isinstance(payload, dict):
@@ -61,8 +67,10 @@ def main():
     parser.add_argument('--watch-seconds', type=float, default=3600)
     args = parser.parse_args()
     payload = {}
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')  # Wake previews carry peer text.
     try:
-        payload = json.load(sys.stdin)
+        payload = read_payload(sys.stdin)
         cleaned = []
         if requests_board(payload) and not args.workspace and isinstance(payload.get('cwd'), str)                 and Path(payload['cwd']).is_absolute():
             cleaned = prepare_route(payload['cwd'])[3]  # Only /board may create or repair a route.

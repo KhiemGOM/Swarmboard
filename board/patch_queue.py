@@ -48,7 +48,8 @@ def file_path(hub, relative):
         raise BoardError('Patch queues require an existing regular UTF-8 file')
     if path.stat().st_size > MAX_FILE:
         raise BoardError('Patch queue file exceeds 1 MiB')
-    return path
+    # Board keys are case-folded on Windows; replacing onto that spelling would rename the file.
+    return path.resolve()
 
 
 def read_file(hub, relative):
