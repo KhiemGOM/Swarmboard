@@ -56,16 +56,20 @@ def watch_inbox(workspace, database, payload, seconds=3600, poll_seconds=2):
             # Replaced/retired identities must not keep waking this session.
             if json.loads(binding.read_text()).get('agent_id') != agent:
                 return None
-            if not owns_inbox_binding(database, 'claude', key, agent):
-                return None
-            from .waits import poll
-            poll(str(database), workspace)
-            with closing(sqlite3.connect(f'{database.as_uri()}?mode=ro', uri=True, timeout=2)) as db:
-                configured = db.execute("SELECT value FROM settings WHERE key='workspace'").fetchone()
-                active = db.execute('SELECT state,disconnected FROM agents WHERE id=?', (agent,)).fetchone()
-                if not configured or Path(configured[0]).resolve() != workspace or not active or active[0] != 'active' or active[1] is not None:
+            try:
+                if not owns_inbox_binding(database, 'claude', key, agent):
                     return None
-                rows = db.execute('SELECT id,sender,body FROM messages WHERE recipient=? AND acknowledged IS NULL AND id>? ORDER BY id LIMIT 3', (agent, last)).fetchall()
+                from .waits import poll
+                poll(str(database), workspace)
+                with closing(sqlite3.connect(f'{database.as_uri()}?mode=ro', uri=True, timeout=2)) as db:
+                    configured = db.execute("SELECT value FROM settings WHERE key='workspace'").fetchone()
+                    active = db.execute('SELECT state,disconnected FROM agents WHERE id=?', (agent,)).fetchone()
+                    if not configured or Path(configured[0]).resolve() != workspace or not active or active[0] != 'active' or active[1] is not None:
+                        return None
+                    rows = db.execute('SELECT id,sender,body FROM messages WHERE recipient=? AND acknowledged IS NULL AND id>? ORDER BY id LIMIT 3', (agent, last)).fetchall()
+            except sqlite3.OperationalError:
+                # Other chats and the hub share this file; a busy moment must not leave this chat unwakeable.
+                rows = []
             if rows:
                 preview = [{'id': row[0], 'sender': row[1], 'body': row[2][:1000]} for row in rows]
                 temporary = watermark.with_suffix('.tmp')

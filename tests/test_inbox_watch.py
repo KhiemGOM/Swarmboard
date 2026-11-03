@@ -134,3 +134,50 @@ class InboxWatchTests(unittest.TestCase):
         self.assertIsNone(watch_inbox(self.root, self.database, duplicate, seconds=.04, poll_seconds=.005))
         adapter.handle({**duplicate, 'hook_event_name': 'SessionEnd'})
         self.assertIn('Owner only', self.watch())
+
+
+class WatcherLockContentionTests(unittest.TestCase):
+    """Several idle chats share one SQLite file; a busy database must not silently end a watcher."""
+
+    setUp = InboxWatchTests.setUp
+    tearDown = InboxWatchTests.tearDown
+    send = InboxWatchTests.send
+    watch = InboxWatchTests.watch
+
+    def test_transient_lock_error_does_not_end_the_watcher(self):
+        from unittest.mock import patch
+        import sqlite3
+        from board import waits
+        real, calls = waits.poll, []
+
+        def flaky(*args):
+            calls.append(1)
+            if len(calls) <= 2:
+                raise sqlite3.OperationalError('database is locked')
+            return real(*args)
+        self.send()
+        with patch('board.waits.poll', flaky):
+            self.assertIn('New message', self.watch(seconds=1))
+        self.assertGreater(len(calls), 2)
+
+    def test_database_locked_by_another_writer_still_delivers_after_release(self):
+        import sqlite3
+        self.send()
+        blocker = sqlite3.connect(self.database, timeout=0, isolation_level=None, check_same_thread=False)
+        blocker.execute('BEGIN EXCLUSIVE')
+        release = threading.Timer(2.5, blocker.execute, ('COMMIT',))
+        release.start()
+        try:
+            self.assertIn('New message', self.watch(seconds=8))
+        finally:
+            release.join()
+            blocker.close()
+
+    def test_persistent_lock_ends_quietly_at_the_deadline_and_frees_the_lease(self):
+        from unittest.mock import patch
+        import sqlite3
+        self.send()
+        with patch('board.waits.poll', side_effect=sqlite3.OperationalError('database is locked')):
+            self.assertIsNone(self.watch(seconds=.1))
+        self.assertEqual(list((self.root / 'hook-sessions').glob('*.watch.lock')), [])
+        self.assertIn('New message', self.watch())  # the next Stop rearms normally

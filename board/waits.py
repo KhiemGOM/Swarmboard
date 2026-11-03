@@ -57,8 +57,14 @@ def poll(database, workspace):
     db = sqlite3.connect(Path(database).resolve().as_uri() + '?mode=rw', uri=True, timeout=2)
     db.row_factory = sqlite3.Row
     try:
+        # Every idle chat polls; only take the write lock when a wait could actually fire.
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='board_waits'").fetchone() or \
+                not db.execute("SELECT 1 FROM board_waits WHERE state='WAITING' LIMIT 1").fetchone():
+            return
         with db:
-            db.execute('BEGIN IMMEDIATE')
+            # Deferred: reads share the file; the write lock is taken only if a wait fires. A watcher
+            # that loses that race gets "locked", retries, and then sees the wait already FIRED.
+            db.execute('BEGIN')
             configured = db.execute("SELECT value FROM settings WHERE key='workspace'").fetchone()
             if not configured or Path(configured[0]).resolve() != Path(workspace).resolve():
                 return

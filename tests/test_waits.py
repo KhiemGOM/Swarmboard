@@ -119,3 +119,49 @@ class WaitTests(unittest.TestCase):
         self.call(self.b, 'retire', target_agent_id=successor['agent_id'], reason='Owner requested')
         with self.hub.connect() as db:
             self.assertFalse(db.execute("SELECT 1 FROM board_waits WHERE agent=? AND state='WAITING'", (successor['agent_id'],)).fetchone())
+
+
+class PollContentionTests(unittest.TestCase):
+    setUp = WaitTests.setUp
+    call = WaitTests.call
+    messages = WaitTests.messages
+
+    def hold_write_lock(self):
+        import sqlite3
+        blocker = sqlite3.connect(self.db, timeout=0, isolation_level=None)
+        blocker.execute('BEGIN IMMEDIATE')
+        self.blocker = blocker
+
+    def tearDown(self):
+        if getattr(self, 'blocker', None):
+            self.blocker.execute('ROLLBACK')
+            self.blocker.close()
+        WaitTests.tearDown(self)
+
+    def test_idle_poll_takes_no_write_lock(self):
+        self.hold_write_lock()
+        started = time.time()
+        poll(str(self.db), self.root)  # nothing is waiting: must not queue behind the writer
+        self.assertLess(time.time() - started, 1)
+
+    def test_due_wait_still_fires_from_poll(self):
+        claim = self.call(self.b, 'mutex_claim', resources=['misc:unity-player'], reason='play mode')
+        self.call(self.a, 'board_wait', action='subscribe', kind='mutex_free', resource='misc:unity-player')
+        with self.hub.connect() as db:
+            db.execute('UPDATE claims SET expires=0 WHERE id=?', (claim['claim_ids'][0],))
+        poll(str(self.db), self.root)
+        self.assertIn('is ready', self.messages(self.a)[0]['body'])
+
+    def test_pending_wait_does_not_fire_while_lock_is_held(self):
+        self.call(self.b, 'mutex_claim', resources=['misc:unity-player'], reason='play mode')
+        self.call(self.a, 'board_wait', action='subscribe', kind='mutex_free', resource='misc:unity-player')
+        poll(str(self.db), self.root)
+        self.assertEqual(self.messages(self.a), [])
+
+    def test_pending_wait_that_cannot_fire_takes_no_write_lock(self):
+        self.call(self.b, 'mutex_claim', resources=['misc:unity-editor'], reason='editor busy')
+        self.call(self.a, 'board_wait', action='subscribe', kind='mutex_free', resource='misc:unity-editor')
+        self.hold_write_lock()
+        started = time.time()
+        poll(str(self.db), self.root)
+        self.assertLess(time.time() - started, 1)
