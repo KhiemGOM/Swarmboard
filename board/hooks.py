@@ -123,13 +123,32 @@ def edit_paths(name, arguments):
     return []
 
 
+# Hooks share the file with the hub and every chat's watcher; 2s gave up under ordinary bursts.
+# SQLite overshoots this by about a second; it still fits the 10s hook budget.
+HOOK_DB_TIMEOUT = 5
+
+
 def owns_inbox_binding(database, harness, session_key, agent):
     """The hub's native binding decides which chat receives an agent's inbox.
 
     hook_inbox_bindings mirrors it for status display and older readers.
     """
     database = Path(database).resolve()
-    with closing(sqlite3.connect(database, timeout=2)) as db:
+    # Every idle Claude chat asks this every poll; answer from a read when the mirror is current.
+    with closing(sqlite3.connect(f'{database.as_uri()}?mode=ro', uri=True, timeout=HOOK_DB_TIMEOUT)) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE name IN ('native_sessions','hook_inbox_bindings')")}
+        if 'native_sessions' in tables:
+            identity = db.execute('SELECT state FROM agents WHERE id=?', (agent,)).fetchone()
+            bound = db.execute('SELECT agent FROM native_sessions WHERE harness=? AND session_key=?',
+                               (harness, session_key)).fetchone()
+            if not identity or identity[0] != 'active' or not bound or bound[0] != agent:
+                return False
+            if 'hook_inbox_bindings' in tables and db.execute(
+                    'SELECT COUNT(*)=1 AND SUM(agent=? AND session_key=?)=1 FROM hook_inbox_bindings '
+                    'WHERE harness=? AND (agent=? OR session_key=?)',
+                    (agent, session_key, harness, agent, session_key)).fetchone()[0]:
+                return True
+    with closing(sqlite3.connect(database, timeout=HOOK_DB_TIMEOUT)) as db:
         with db:
             db.execute('BEGIN IMMEDIATE')
             identity = db.execute('SELECT state FROM agents WHERE id=?', (agent,)).fetchone()
@@ -160,7 +179,7 @@ class Adapter:
         """This chat's identity is the hub's native binding; nothing else is trusted or cached."""
         if not self.database.is_file():
             return None
-        with closing(sqlite3.connect(f'{self.database.as_uri()}?mode=ro', uri=True, timeout=2)) as db:
+        with closing(sqlite3.connect(f'{self.database.as_uri()}?mode=ro', uri=True, timeout=HOOK_DB_TIMEOUT)) as db:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE name='native_sessions'").fetchone():
                 return None
             row = db.execute('''SELECT a.id,a.token,a.state,a.disconnected FROM native_sessions n
@@ -173,7 +192,7 @@ class Adapter:
         if not self.database.is_file():
             return False
         from .sessions import bind
-        with closing(sqlite3.connect(self.database, timeout=2)) as db:
+        with closing(sqlite3.connect(self.database, timeout=HOOK_DB_TIMEOUT)) as db:
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 row = db.execute('SELECT state FROM agents WHERE id=?', (agent,)).fetchone()
@@ -189,7 +208,7 @@ class Adapter:
         if not self.database.is_file():
             return False
         from .sessions import identify
-        with closing(sqlite3.connect(self.database, timeout=2)) as db:
+        with closing(sqlite3.connect(self.database, timeout=HOOK_DB_TIMEOUT)) as db:
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 if not db.execute('SELECT 1 FROM agents WHERE id=?', (agent,)).fetchone():
@@ -376,7 +395,7 @@ class Adapter:
         if session:
             from .activity import record
             key = hashlib.sha256((self.harness + ':' + session).encode()).hexdigest()
-            with closing(sqlite3.connect(self.database, timeout=2)) as db:
+            with closing(sqlite3.connect(self.database, timeout=HOOK_DB_TIMEOUT)) as db:
                 with db:
                     db.execute('BEGIN IMMEDIATE')
                     record(db, auth, self.harness, key, payload.get('hook_event_name'))
@@ -465,7 +484,7 @@ class Adapter:
             return
         # Only a verified native hook updates activity, never a model-supplied tool argument.
         from .desktop_wake import initialize
-        with closing(sqlite3.connect(self.database, timeout=2)) as db:
+        with closing(sqlite3.connect(self.database, timeout=HOOK_DB_TIMEOUT)) as db:
             with db:
                 db.execute('BEGIN IMMEDIATE')
                 initialize(db)
