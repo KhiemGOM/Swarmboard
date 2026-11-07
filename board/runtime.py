@@ -96,7 +96,68 @@ def stale_routes(directory):
 def find_project(cwd):
     """Nearest folder with a valid route; a stale copy in between never redirects the chat."""
     cwd = Path(cwd).resolve()
-    return next((d for d in (cwd, *cwd.parents) if read_route(d)), None)
+    return next((d for d in (cwd, *cwd.parents) if read_route(d) or adopt_moved(d)), None)
+
+
+def stored_workspace(database, key='workspace'):
+    import sqlite3
+    from contextlib import closing
+    try:
+        with closing(sqlite3.connect(f'{Path(database).resolve().as_uri()}?mode=ro', uri=True)) as db:
+            row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def adopt_moved(directory):
+    """A project folder moved or copied with its .board: rebind that board to the folder it now sits in.
+
+    Only when unambiguous: the folder's own .board/hub.sqlite names the workspace its copied route
+    names, and that route pointed at the old folder's own .board database. Anything else stays refused.
+    """
+    directory = Path(directory).resolve()
+    canonical, database = directory / ROUTE, directory / '.board' / 'hub.sqlite'
+    if not canonical.is_file() or not database.is_file():
+        return False
+    try:
+        saved = json.loads(canonical.read_text(encoding='utf-8'))
+        previous = Path(saved['workspace']).resolve()
+        routed = Path(saved.get('database') or previous / '.board/hub.sqlite')
+        routed = (routed if routed.is_absolute() else previous / routed).resolve()
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    if previous == directory:
+        # /board already rewrote the route; only the copied database still names the old folder.
+        if routed != database.resolve():
+            return False
+        recorded = stored_workspace(database)
+        if not recorded or Path(recorded).resolve() == directory:
+            return False
+        previous = Path(recorded).resolve()
+        # Without the copied route as evidence, require the original board it was copied from.
+        original = previous / '.board' / 'hub.sqlite'
+        if not original.is_file() or stored_workspace(original, 'database_id') != stored_workspace(database, 'database_id'):
+            return False
+    elif routed != (previous / '.board' / 'hub.sqlite').resolve() or not stored_workspace(database) or \
+            Path(stored_workspace(database)).resolve() != previous:
+        return False
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(database, timeout=5)) as db:
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT value FROM settings WHERE key='workspace'").fetchone()
+            if row and Path(row[0]).resolve() == previous:
+                db.execute("UPDATE settings SET value=? WHERE key='workspace'", (str(directory),))
+                db.execute('INSERT INTO events(kind,agent,payload,created) VALUES (?,?,?,?)',
+                           ('workspace_moved', 'system', json.dumps({'previous_workspace': str(previous), 'workspace': str(directory)}), time.time()))
+    # The old folder may still exist with its own hub, so the copy gets this folder's own port.
+    route = {'workspace': str(directory), 'database': str(database), 'port': default_port(directory)}
+    temporary = canonical.with_name(canonical.name + '.tmp')
+    temporary.write_text(json.dumps(route, indent=2) + '\n', encoding='utf-8')
+    os.replace(temporary, canonical)
+    return True
 
 
 def default_port(workspace):
@@ -154,6 +215,7 @@ def workspace_connection(workspace=None, database=None, url=None):
         expected = Path(workspace).resolve()
     if not expected.is_dir():
         raise BoardError("Workspace must be an existing directory")
+    adopt_moved(expected)
     if stale_routes(expected):
         raise BoardError(f'Local board configuration in {expected} belongs to a different workspace; refusing connection. '
                          'Type /board in a chat opened in this project to repair it.')

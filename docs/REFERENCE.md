@@ -842,6 +842,16 @@ Now nothing about "the current chat" lives in the bridge:
   naming another workspace is stale: it is skipped while searching upward and
   refused when named directly. `.codex/board-operator.json` is still read until
   `/board` migrates it.
+- A project moved or copied together with its `.board` folder is adopted on the
+  next hook or bridge call: when the copied route and the folder's own
+  `.board/hub.sqlite` both name the old folder, the board is rebound to the new
+  folder with its history, given this folder's own port, and a `workspace_moved`
+  event is recorded. A copy keeps the original board untouched. Any other mismatch
+  stays refused.
+- When a project's board configuration cannot be used, the hook denies board calls
+  with the real reason instead of letting them reach the bridge unrouted (which
+  would look like a `SHARED_BRIDGE` problem). `board_workspace` still passes, so a
+  chat can choose another project.
 - The identity is the hub's binding for that native chat. Two chats never share
   one, and the same chat keeps one across bridges. The `native-reconnect` cache and
   hook token checks are gone. If a board is wiped under a bridge, its next call

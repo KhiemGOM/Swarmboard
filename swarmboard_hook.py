@@ -9,7 +9,7 @@ from pathlib import Path
 from board.runtime import find_project, prepare_route, workspace_connection
 
 from board.core import BoardError
-from board.hooks import Adapter, context, requests_board
+from board.hooks import Adapter, context, deny, requests_board
 
 
 def unavailable(payload, database, harness, reason=None):
@@ -30,6 +30,19 @@ def unavailable(payload, database, harness, reason=None):
     except (OSError, ValueError):
         return {}  # No repeated warnings if even local hint storage is unavailable.
     return context(payload.get('hook_event_name'), 'Swarmboard disconnected; local work is allowed. Coordination checks resume when connected.')
+
+
+def board_call(payload):
+    return payload.get('hook_event_name') == 'PreToolUse' and str(payload.get('tool_name', '')).startswith('mcp__board__') \
+        and isinstance(payload.get('session_id'), str) and payload['session_id'] \
+        and isinstance(payload.get('cwd'), str) and Path(payload['cwd']).is_absolute()
+
+
+def chat_route(payload, harness):
+    """Stamp this chat's route even when the project board is unusable, so the bridge reports the real problem."""
+    route = {'harness': harness, 'session_id': payload['session_id'], 'cwd': str(Path(payload['cwd']).resolve())}
+    return {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
+                                   'updatedInput': {**(payload.get('tool_input') or {}), '_route': route}}}
 
 
 def read_payload(stream):
@@ -76,7 +89,8 @@ def main():
             cleaned = prepare_route(payload['cwd'])[3]  # Only /board may create or repair a route.
         connection = hook_connection(payload, args.workspace, args.database, args.url)
         if connection is None:
-            print(json.dumps({}))  # Not a Swarmboard project: a normal repository.
+            # Not a Swarmboard project: a normal repository. A board call still names its chat.
+            print(json.dumps(chat_route(payload, args.harness) if board_call(payload) else {}))
             return
         args.workspace, args.database, args.url = connection
         if args.watch_inbox:
@@ -106,7 +120,12 @@ def main():
             except OSError:
                 pass
     except (BoardError, OSError, ValueError, KeyError, TypeError, RecursionError, sqlite3.Error) as exc:
-        result = unavailable(payload, args.database, args.harness, exc)
+        if isinstance(payload, dict) and board_call(payload):
+            # Letting it through unrouted would surface as a misleading shared-bridge error.
+            result = chat_route(payload, args.harness) if payload['tool_name'] == 'mcp__board__board_workspace' else \
+                deny(f'Swarmboard cannot use this project\'s board: {str(exc)[:500]}')
+        else:
+            result = unavailable(payload, args.database, args.harness, exc)
     print(json.dumps(result))
 
 
