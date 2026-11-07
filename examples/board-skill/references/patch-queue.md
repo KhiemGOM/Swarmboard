@@ -51,7 +51,12 @@ automatic conflict resolution or immediate publication while peers are working.
 3. Prepare a single-file unified diff with `--- a/path` and `+++ b/path`.
    Do not edit the queued file itself. A private scratch copy is fine; do not
    confuse it with the shared file. Submit with `action=submit`, `batch_id`,
-   `base_hash`, `patch`. The diff must match that base exactly. Each participant
+   `base_hash`, `patch`. The diff must match that base exactly.
+   Instead of a diff you may submit the whole new file: write the base to a
+   scratch copy, change it however you like (script, codemod, editor), then
+   submit `new_content_path` with that copy's path (or `new_content` with the
+   text). The board diffs it against the base, keeps the base's line endings,
+   and treats it like any other patch, so change only your own region. Each participant
    has one accepted patch; resubmitting replaces your own patch until release.
 4. If rejected, inspect conflicting patch IDs and the candidate via `read`, then
    revise against the same base. Other accepted patches remain unchanged.

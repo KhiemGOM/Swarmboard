@@ -279,6 +279,17 @@ against the base and atomically rejects overlaps with previously accepted patche
 Disjoint edits are accepted even when their diff context overlaps. Resubmission
 replaces your own patch before release; a rejected revision preserves it.
 
+Instead of `patch`, a submit can carry the complete new file: `new_content` with
+the text, or `new_content_path` naming a file that holds it, such as a scratch copy
+of the base that a script rewrote. Exactly one of the three is accepted. The board
+diffs the file against the base with line endings normalized, so a script that
+writes LF over a CRLF base changes only the lines it meant to, and the published
+file keeps the base's endings. The generated diff is stored as the patch and is
+readable with `content=patch`. The file must be UTF-8 text of at most 1 MiB and
+must not be the queued file itself. Only the lines that differ count as your
+edits, so unrelated whole-file churn such as reformatting will collide with
+other participants.
+
 `release` ends participation. `withdraw` also ends participation and preserves
 any accepted patch. Once every participant finishes, the batch freezes and the
 board publishes the combined candidate automatically. It checks the actual file
@@ -329,6 +340,15 @@ use the actual paths in your project. No automatic detection or globs. New file
 claims and covering folder claims are refused with queue guidance. Existing
 holders can renew and finish or relax; policy changes do not revoke them. Resource
 mutexes are unaffected. `board_info.queue_only_files` exposes the current list.
+
+To lock everything in a folder except those files, claim it with
+`except_protected: true`: queue-only files and files with a live patch queue inside
+the folder become exclusions of that claim. `exclude: [...]` carves out any other
+files or folders inside the claimed folders, such as a file another agent holds.
+Each exclusion must sit strictly inside a claimed folder (at most 64 per claim);
+renewal keeps earlier exclusions, and the result lists them under `excluded`.
+Excluded paths are not yours either: edit them only through their queue or a
+separate claim.
 Agents must not edit this configuration to bypass the policy. Patch queues still
 require existing regular UTF-8 files; missing files must be created before marking
 them queue-only.

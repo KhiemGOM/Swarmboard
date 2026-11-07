@@ -1,4 +1,5 @@
 """Shared preparation, serialized patch acceptance, journaled file publication."""
+import difflib
 import hashlib
 import json
 import os
@@ -63,9 +64,40 @@ def read_file(hub, relative):
     return text
 
 
-def proposed(base, patch, path):
+def whole_file(hub, base, path, p):
+    """A submitted replacement file, from inline text or a file the agent wrote (e.g. by script)."""
+    if 'new_content' in p:
+        content = p['new_content']
+        if not isinstance(content, str):
+            raise BoardError('new_content must be the complete new file text')
+    else:
+        source = p['new_content_path']
+        if not isinstance(source, str) or not source.strip():
+            raise BoardError('new_content_path must name the file holding the complete new text')
+        source = (hub.workspace / source).resolve()
+        if source == file_path(hub, path):
+            raise BoardError('new_content_path must be your own copy, not the queued file')
+        try:
+            if not source.is_file() or source.stat().st_size > MAX_FILE:
+                raise BoardError('new_content_path must be an existing regular file of at most 1 MiB')
+            content = source.read_bytes().decode('utf-8')
+        except (OSError, UnicodeError) as exc:
+            raise BoardError('Cannot read new_content_path as UTF-8: ' + str(exc)) from exc
+    if '\x00' in content or len(content.encode('utf-8')) > MAX_FILE:
+        raise BoardError('new_content must be UTF-8 text at most 1 MiB')
+    # Compare without line endings so a script that rewrote CRLF as LF changes only what it meant to;
+    # the base's endings are reapplied when the diff is applied.
+    def lines(text):
+        return [line.replace('\r\n', '\n') for line in text.splitlines(keepends=True)]
+    diff = []
+    for line in difflib.unified_diff(lines(base), lines(content), 'a/' + path, 'b/' + path):
+        diff.append(line if line.endswith('\n') else line + '\n\\ No newline at end of file\n')
+    return ''.join(diff)
+
+
+def proposed(base, patch, path, limit=32000):
     """Strict single-file unified diff, with exact base/context and hunk counts."""
-    if not isinstance(patch, str) or not patch or len(patch) > 32000:
+    if not isinstance(patch, str) or not patch or len(patch) > limit:
         raise BoardError('patch must be a single-file unified diff of 1 to 32000 characters')
     lines = patch.splitlines(keepends=True)
     if lines and lines[0].startswith('diff --git '):
@@ -280,7 +312,15 @@ def dispatch(hub, db, p, agent, now):
             raise BoardError('Shared file changed outside the queue; do not submit more patches. Incident alert sent on the board check; preserve changes and reconcile.')
         if p.get('base_hash') != batch['base_hash']:
             raise BoardError('base_hash must match the immutable batch base')
-        proposed_content, edits = proposed(batch['base'], p.get('patch'), batch['path'])
+        forms = [key for key in ('patch', 'new_content', 'new_content_path') if key in p]
+        if len(forms) != 1:
+            raise BoardError('Submit exactly one of patch (unified diff), new_content (complete new file) or new_content_path (file holding it)')
+        whole = forms[0] != 'patch'
+        diff = whole_file(hub, batch['base'], batch['path'], p) if whole else p['patch']
+        if whole and not diff:
+            raise BoardError('Patch contains no changes')
+        # A whole file can be up to 1 MiB, so its generated diff may be several times that.
+        proposed_content, edits = proposed(batch['base'], diff, batch['path'], 4 * MAX_FILE if whole else 32000)
         if not edits or proposed_content == batch['base']:
             raise BoardError('Patch contains no changes')
         if compose(batch['base'], edits) != proposed_content:
@@ -296,10 +336,10 @@ def dispatch(hub, db, p, agent, now):
         candidate = compose(batch['base'], edits + [edit for row in others for edit in json.loads(row['edits'])])
         if own:
             patch_id = own[0]['id']
-            db.execute('UPDATE patches SET diff=?,edits=?,updated=? WHERE id=?', (p['patch'], json.dumps(edits), now, patch_id))
+            db.execute('UPDATE patches SET diff=?,edits=?,updated=? WHERE id=?', (diff, json.dumps(edits), now, patch_id))
         else:
             patch_id = db.execute("INSERT INTO patches(batch_id,agent,diff,edits,state,created,updated) VALUES (?,?,?,?,'QUEUED',?,?)",
-                                  (batch_id, agent, p['patch'], json.dumps(edits), now, now)).lastrowid
+                                  (batch_id, agent, diff, json.dumps(edits), now, now)).lastrowid
         db.execute('UPDATE patch_batches SET candidate=?,updated=? WHERE id=?', (candidate, now, batch_id))
         hub.event(db, 'patch_accepted', agent, {'batch_id': batch_id, 'patch_id': patch_id})
         return {'accepted': True, 'batch_id': batch_id, 'patch_id': patch_id, 'candidate_hash': digest(candidate), 'instructions': 'Accepted into candidate only. Release when done. Inspect and run targeted tests after the one final inbox notification.'}

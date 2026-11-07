@@ -117,7 +117,10 @@ currently readable regular file up to 16 MiB; automatic queue alerts can record
 an unreadable/deleted file with after_hash=null rather than inventing a hash.
 
 The human may configure queue-only files in workspace .swarmboard.json using
-{"queue_only": ["relative/file"]}. Respect the policy and narrow folder claims;
+{"queue_only": ["relative/file"]}. Respect the policy. To lock a folder around
+them, claim it with except_protected=true (leaves out queue-only and live queue
+files) and/or exclude=[paths inside the folder], e.g. another agent's file. Excluded
+paths stay unlocked for you as well;
 never edit the policy to bypass a refused claim. Existing holders can finish or
 relax. Read board_info for the current list. No automatic hot-file detection.
 

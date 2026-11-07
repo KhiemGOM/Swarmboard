@@ -35,6 +35,35 @@ def resource(value):
     return value.casefold()
 
 
+def carve_outs(hub, db, p, folders):
+    """Map each claimed folder to the paths this call asks to leave out of it."""
+    exclude, protect = p.get('exclude', []), p.get('except_protected', False)
+    if not isinstance(exclude, list) or any(not isinstance(value, str) for value in exclude):
+        raise BoardError('exclude must be a list of files or folders inside the claimed folders')
+    if type(protect) is not bool:
+        raise BoardError('except_protected must be a boolean')
+    if (exclude or protect) and not folders:
+        raise BoardError('exclude and except_protected apply to file/folder claims only')
+    def inside(child, folder):
+        return child != folder and (folder == '.' or child.startswith(folder + '/'))
+    added = {folder: [] for folder in folders}
+    for value in exclude:
+        path = hub.path(value)
+        containers = [folder for folder in folders if inside(path, folder)]
+        if not containers:
+            raise BoardError(f'exclude path {value} is not inside any folder in this claim')
+        for folder in containers:
+            added[folder].append(path)
+    if protect:
+        from .coordination import hot_files
+        live = [row[0] for row in db.execute("SELECT path FROM patch_batches WHERE state IN ('OPEN','READY','APPLYING')")]
+        for path in hot_files(hub) + live:
+            for folder in folders:
+                if inside(path, folder):
+                    added[folder].append(path)
+    return {folder: list(dict.fromkeys(items)) for folder, items in added.items()}
+
+
 def dispatch(hub, db, method, p, agent, now):
     if method in ("claim", "mutex_claim"):
         files = p.get("paths", [])
@@ -50,8 +79,15 @@ def dispatch(hub, db, method, p, agent, now):
             result = dispatch(hub, db, method, {**p, "paths": [v for v in files if v not in outside]}, agent, now)
             return {**result, "outside_workspace": outside, "outside_note": OUTSIDE_NOTE}
         entities = list(dict.fromkeys([("file", hub.path(v)) for v in files] + [("resource", resource(v)) for v in resources]))
-        proposed = {(kind, path): db.execute('SELECT * FROM claims WHERE active=1 AND agent=? AND kind=? AND path=?',
-                    (agent, kind, path)).fetchone() or {'path': path, 'exclusions': []} for kind, path in entities}
+        added = carve_outs(hub, db, p, [path for kind, path in entities if kind == 'file'])
+        proposed = {}
+        for kind, path in entities:
+            own = db.execute('SELECT * FROM claims WHERE active=1 AND agent=? AND kind=? AND path=?', (agent, kind, path)).fetchone()
+            # Renewal never drops a carve-out: that would silently re-protect a file others now use.
+            merged = list(dict.fromkeys((exclusions(own) if own else []) + added.get(path, [])))
+            if len(merged) > 64:
+                raise BoardError(f'At most 64 exclusions per claim; {path} would have {len(merged)}. Claim narrower folders instead.')
+            proposed[kind, path] = {'path': path, 'exclusions': merged}
         ttl = p.get("ttl_seconds", 7200)
         if not isinstance(ttl, (int, float)) or isinstance(ttl, bool) or not 1 <= ttl <= 7200:
             raise BoardError("ttl_seconds must be between 1 and 7200")
@@ -64,18 +100,19 @@ def dispatch(hub, db, method, p, agent, now):
             results = []
             for kind, path in entities:
                 item = dispatch(hub, db, method, {**p, 'partial': False, 'paths': [path] if kind == 'file' else [],
-                                'resources': [path] if kind == 'resource' else []}, agent, now)
+                                'resources': [path] if kind == 'resource' else [], 'exclude': added.get(path, []),
+                                'except_protected': kind == 'file' and p.get('except_protected', False)}, agent, now)
                 results.append({'kind': kind, 'path': path, **item})
             return {'accepted': all(r['accepted'] for r in results), 'partial': True, 'results': results,
                     'claim_ids': [i for r in results if r['accepted'] for i in r['claim_ids']]}
         from .coordination import hot_files
         hot = [file for file in (hot_files(hub) if files else []) if any(kind == 'file' and hub.overlaps(path, file) for kind, path in entities)]
         # Grandfather existing claims without allowing a new enclosing folder claim.
-        new_hot = [file for file in hot if any(kind == 'file' and hub.overlaps(path, file) and not
+        new_hot = [file for file in hot if any(kind == 'file' and intersects(proposed[kind, path], file) and not
                    db.execute("SELECT 1 FROM claims WHERE active=1 AND agent=? AND kind='file' AND path=?", (agent, path)).fetchone()
                    for kind, path in entities)]
         if new_hot:
-            return {'accepted': False, 'queue_only_files': new_hot, 'reason': 'Queue-only policy: use patch_queue join; narrow folder claims to exclude these files.'}
+            return {'accepted': False, 'queue_only_files': new_hot, 'reason': 'Queue-only policy: use patch_queue join for these files. To lock a folder around them, repeat the claim with except_protected=true (or exclude=[...]).'}
         conflicts = [dict(r) for r in db.execute("SELECT * FROM claims WHERE active=1 AND agent!=?", (agent,))
                      if any(kind == r["kind"] and (shared(proposed[kind, path], r) if kind == "file" else path == r["path"])
                             for kind, path in entities)]
@@ -90,11 +127,12 @@ def dispatch(hub, db, method, p, agent, now):
         for kind, path in entities:
             own = db.execute("SELECT id FROM claims WHERE active=1 AND agent=? AND kind=? AND path=?", (agent, kind, path)).fetchone()
             if own:
-                db.execute("UPDATE claims SET expires=?,reason=? WHERE id=?", (now + ttl, reason, own[0]))
+                db.execute("UPDATE claims SET expires=?,reason=?,exclusions=? WHERE id=?",
+                           (now + ttl, reason, json.dumps(proposed[kind, path]['exclusions']), own[0]))
                 claim_id = own[0]
             else:
-                claim_id = db.execute("INSERT INTO claims(agent,path,kind,reason,started,expires,active) VALUES (?,?,?,?,?,?,1)",
-                                      (agent, path, kind, reason, now, now + ttl)).lastrowid
+                claim_id = db.execute("INSERT INTO claims(agent,path,kind,reason,started,expires,active,exclusions) VALUES (?,?,?,?,?,?,1,?)",
+                                      (agent, path, kind, reason, now, now + ttl, json.dumps(proposed[kind, path]['exclusions']))).lastrowid
             ids.append(claim_id)
             if kind == "file":
                 prior = db.execute('SELECT state FROM custody WHERE path=?', (path,)).fetchone()
@@ -114,7 +152,11 @@ def dispatch(hub, db, method, p, agent, now):
                 db.execute("INSERT INTO custody VALUES (?,?,'ACTIVE',?,NULL,?) ON CONFLICT(path) DO UPDATE SET owner=excluded.owner,state='ACTIVE',reason=excluded.reason,commit_hash=NULL,updated=excluded.updated",
                            (path, agent, reason, now))
         hub.event(db, "claimed", agent, {"entities": entities, "claim_ids": ids})
-        return {"accepted": True, "claim_ids": ids, "expires": now + ttl, "advisory_resources": [path for kind, path in entities if kind == "resource"]}
+        result = {"accepted": True, "claim_ids": ids, "expires": now + ttl, "advisory_resources": [path for kind, path in entities if kind == "resource"]}
+        if any(added.values()):
+            result['excluded'] = {path: items for path, items in added.items() if items}
+            result['excluded_note'] = 'These paths stay outside your lock: do not edit them directly (queue files go through patch_queue).'
+        return result
     if method == "release":
         ids = p.get("claim_ids")
         if not isinstance(ids, list) or not ids or any(type(i) is not int for i in ids):
