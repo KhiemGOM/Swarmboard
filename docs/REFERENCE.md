@@ -834,10 +834,18 @@ server from `claude_desktop_config.json` once for every local Code chat. Earlier
 bridges kept one identity and workspace in memory, so chats acted as each other.
 Now nothing about "the current chat" lives in the bridge:
 
-- Each board call carries `_route` (harness, native session ID, folder), written
-  by the `PreToolUse` hook from the harness payload. It overwrites any value the
-  model supplied. Without a hook-written route, a bridge uses its own process's
-  session and folder; a Claude bridge that has neither refuses with `SHARED_BRIDGE`.
+- Each board call has a route (harness, native session ID, folder) written by
+  the `PreToolUse` hook from the harness payload. The hook does not change the
+  call: Claude Code's auto mode refuses calls a hook rewrote. It records the route
+  under the call's `tool_use_id` in `~/.swarmboard/calls/` (override with
+  `SWARMBOARD_CALLS_DIR`), and the bridge takes it using the
+  `_meta["claudecode/toolUseId"]` Claude Code sends with every MCP call. The
+  recorded route outranks any `_route` the model wrote; unused records expire after
+  10 minutes. A harness that sends no tool-use ID still gets `_route` stamped into
+  the input. Without any hook route, a bridge uses its own process's session and
+  folder; a Claude bridge that has neither refuses with `SHARED_BRIDGE`. Bridges
+  started before 0.14.3 do not read recorded routes: restart Claude Desktop (or
+  reconnect the board MCP server) after upgrading.
 - The board is the nearest `.board/operator.json` above that folder. A route file
   naming another workspace is stale: it is skipped while searching upward and
   refused when named directly. `.codex/board-operator.json` is still read until
@@ -853,7 +861,12 @@ Now nothing about "the current chat" lives in the bridge:
   would look like a `SHARED_BRIDGE` problem). `board_workspace` still passes, so a
   chat can choose another project.
 - The identity is the hub's binding for that native chat. Two chats never share
-  one, and the same chat keeps one across bridges. The `native-reconnect` cache and
+  one, and the same chat keeps one across bridges. Claude Desktop can switch a
+  chat to a new CLI session ID mid-conversation (for example after moving it to
+  another folder). Hooks record the Desktop chat ID (`CLAUDE_CODE_HOST_SESSION_ID`)
+  with an opted-in chat's state, and a new session ID under the same Desktop chat
+  inherits the opt-in and its live identity on its first hook. A forked chat has
+  its own Desktop ID and still needs `/board`. The `native-reconnect` cache and
   hook token checks are gone. If a board is wiped under a bridge, its next call
   re-registers.
 

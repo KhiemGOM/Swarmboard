@@ -314,9 +314,11 @@ def text_result(output, error=False):
     return {'content': [{'type': 'text', 'text': encode(output)}], 'isError': error}
 
 
-def run_tool(links, name, arguments):
-    hooked = arguments.get('_route') is not None
-    route = chat_route(links.args, arguments.pop('_route', None))
+def run_tool(links, name, arguments, recorded=None):
+    # The hook's recorded route for this exact call outranks anything written into the arguments.
+    stamped = arguments.pop('_route', None)
+    hooked = (recorded or stamped) is not None
+    route = chat_route(links.args, recorded if recorded is not None else stamped)
     if name == 'board_workspace':
         try:
             link = links.resolve(route)
@@ -416,8 +418,10 @@ def main():
                 arguments = params.get("arguments", {})
                 if not isinstance(arguments, dict):
                     raise BoardError("Tool arguments must be an object")
+                meta = params.get('_meta') if isinstance(params.get('_meta'), dict) else {}
+                from .call_routes import take
                 try:
-                    result = run_tool(links, name, dict(arguments))
+                    result = run_tool(links, name, dict(arguments), take(meta.get('claudecode/toolUseId')))
                 except (BoardError, OSError) as exc:
                     result = text_result({'error': str(exc)}, True)
             elif method == "resources/list":

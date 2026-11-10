@@ -9,7 +9,7 @@ from pathlib import Path
 from board.runtime import find_project, prepare_route, workspace_connection
 
 from board.core import BoardError
-from board.hooks import Adapter, context, deny, requests_board
+from board.hooks import Adapter, context, deny, requests_board, route_call
 
 
 def unavailable(payload, database, harness, reason=None):
@@ -39,10 +39,8 @@ def board_call(payload):
 
 
 def chat_route(payload, harness):
-    """Stamp this chat's route even when the project board is unusable, so the bridge reports the real problem."""
-    route = {'harness': harness, 'session_id': payload['session_id'], 'cwd': str(Path(payload['cwd']).resolve())}
-    return {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
-                                   'updatedInput': {**(payload.get('tool_input') or {}), '_route': route}}}
+    """Route this chat's call even when the project board is unusable, so the bridge reports the real problem."""
+    return route_call(payload, {'harness': harness, 'session_id': payload['session_id'], 'cwd': str(Path(payload['cwd']).resolve())})
 
 
 def read_payload(stream):

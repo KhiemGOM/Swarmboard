@@ -1,5 +1,7 @@
 """Native chat continuity; retirement ends ownership without banning future joins."""
+import json
 import secrets
+import time
 
 from .core import BoardError
 
@@ -34,6 +36,22 @@ def bind(db, harness, key, agent):
     if previous and previous[0] != agent:
         db.execute('UPDATE native_sessions SET agent=? WHERE harness=? AND session_key=?', (agent,harness,key))
     db.execute('INSERT OR IGNORE INTO native_sessions VALUES (?,?,?)', (harness, key, agent))
+
+
+def move(db, harness, old_key, new_key, agent):
+    """Rebind a live identity from a chat's previous native session to its continuation."""
+    initialize(db)
+    if not db.execute("SELECT 1 FROM agents WHERE id=? AND state='active'", (agent,)).fetchone() or \
+            not db.execute('SELECT 1 FROM native_sessions WHERE harness=? AND session_key=? AND agent=?', (harness, old_key, agent)).fetchone() or \
+            db.execute('SELECT 1 FROM native_sessions WHERE harness=? AND session_key=?', (harness, new_key)).fetchone():
+        return False
+    db.execute('UPDATE native_sessions SET session_key=? WHERE harness=? AND session_key=?', (new_key, harness, old_key))
+    for table in ('hook_inbox_bindings', 'native_activity'):
+        if db.execute('SELECT 1 FROM sqlite_master WHERE name=?', (table,)).fetchone():
+            db.execute(f'UPDATE {table} SET session_key=? WHERE harness=? AND session_key=?', (new_key, harness, old_key))
+    db.execute('INSERT INTO events(kind,agent,payload,created) VALUES (?,?,?,?)',
+               ('native_session_continued', agent, json.dumps({'harness': harness}), time.time()))
+    return True
 
 
 def invalidate(db, target, now, reason, successor=None):

@@ -123,6 +123,22 @@ def edit_paths(name, arguments):
     return []
 
 
+def route_call(payload, route):
+    """Hand the bridge this chat's route without rewriting the call, which auto mode would refuse."""
+    from .call_routes import record
+    if record(payload.get('tool_use_id'), route):
+        return {}
+    # Harnesses that send no tool_use_id get the route stamped into the input as before.
+    return {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
+                                   'updatedInput': {**(payload.get('tool_input') or {}), '_route': route}}}
+
+
+def host_session():
+    """Claude Desktop's own chat ID: stable when the chat's CLI session ID changes underneath it."""
+    value = os.environ.get('CLAUDE_CODE_HOST_SESSION_ID', '')
+    return value if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value) else None
+
+
 # Hooks share the file with the hub and every chat's watcher; 2s gave up under ordinary bursts.
 # SQLite overshoots this by about a second; it still fits the 10s hook budget.
 HOOK_DB_TIMEOUT = 5
@@ -204,6 +220,35 @@ class Adapter:
                     return False
         return True
 
+    def continue_chat(self, host, key, state_path):
+        """Claude Desktop may move one chat to a new CLI session ID; keep its board opt-in and identity.
+
+        The Desktop chat ID stays the same across that switch (a fork gets its own), so the latest
+        opted-in state recorded for it names the identity to carry over.
+        """
+        candidates = []
+        for path in state_path.parent.glob('*.json'):
+            if path.name.count('.') != 1 or path == state_path:
+                continue
+            try:
+                previous = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(previous, dict) and previous.get('host_session') == host and previous.get('agent_id'):
+                candidates.append((path.stat().st_mtime, path.stem, previous))
+        if not candidates or not self.database.is_file():
+            return None
+        _, old_key, previous = max(candidates, key=lambda item: item[0])
+        from .sessions import move
+        with closing(sqlite3.connect(self.database, timeout=HOOK_DB_TIMEOUT)) as db:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                if not move(db, self.harness, old_key, key, previous['agent_id']):
+                    return None
+        state = {key: value for key, value in previous.items() if key in ('activated', 'agent_id', 'linked', 'host_session')}
+        self.save(state_path, state)
+        return state
+
     def declare(self, key, agent):
         if not self.database.is_file():
             return False
@@ -229,6 +274,12 @@ class Adapter:
         key = hashlib.sha256((self.harness + ':' + session_id).encode()).hexdigest()
         state_path = self.database.parent / 'hook-sessions' / (key + '.json')
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        host = host_session() if self.harness == 'claude' else None
+        if host and not state_path.exists():
+            state = self.continue_chat(host, key, state_path) or state
+        elif host and (state.get('activated') or state.get('agent_id')) and state.get('host_session') != host:
+            state['host_session'] = host
+            self.save(state_path, state)
         name = payload.get('tool_name', '')
         activated = False
         if requests_board(payload):
@@ -248,9 +299,7 @@ class Adapter:
                     return deny(RESET_DENIED)
                 self.save(state_path, state)
             # Every board call carries THIS chat's route; the bridge may be shared by other chats.
-            route = {'harness': self.harness, 'session_id': session_id, 'cwd': str(cwd)}
-            return {'hookSpecificOutput': {'hookEventName': 'PreToolUse',
-                                           'updatedInput': {**(payload.get('tool_input') or {}), '_route': route}}}
+            return route_call(payload, {'harness': self.harness, 'session_id': session_id, 'cwd': str(cwd)})
         if event == 'UserPromptExpansion':
             return context(event, ACTIVATED) if activated else {}
         notes = []
